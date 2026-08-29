@@ -508,7 +508,7 @@ async function fetchAllWooCommerceProducts() {
   let page = 1;
   const perPage = 100;
   while (true) {
-    const url = `${WOOCOMMERCE_URL}/wp-json/wc/v3/products?per_page=${perPage}&page=${page}` +
+    const url = `${WOOCOMMERCE_URL}/wp-json/wc/v3/products?per_page=${perPage}&page=${page}&status=publish` +
       `&consumer_key=${encodeURIComponent(process.env.WOOCOMMERCE_CONSUMER_KEY)}` +
       `&consumer_secret=${encodeURIComponent(process.env.WOOCOMMERCE_CONSUMER_SECRET)}`;
     const wcRes = await fetch(url);
