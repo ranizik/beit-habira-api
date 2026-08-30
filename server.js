@@ -525,8 +525,35 @@ async function fetchAllWooCommerceProducts() {
   return products;
 }
 
-function normalizeWooProduct(wp) {
-  const category = (wp.categories && wp.categories[0] && wp.categories[0].name) ? String(wp.categories[0].name).trim() : '';
+// שולף את כל קטגוריות WooCommerce (עם parent) - כדי לשמר מבנה הורה/ילד (יין -> יין אדום) ולא רק רשימה שטוחה
+async function fetchAllWooCommerceCategories() {
+  const cats = [];
+  let page = 1;
+  while (true) {
+    const url = `${WOOCOMMERCE_URL}/wp-json/wc/v3/products/categories?per_page=100&page=${page}` +
+      `&consumer_key=${encodeURIComponent(process.env.WOOCOMMERCE_CONSUMER_KEY)}` +
+      `&consumer_secret=${encodeURIComponent(process.env.WOOCOMMERCE_CONSUMER_SECRET)}`;
+    const wcRes = await fetch(url);
+    if (!wcRes.ok) {
+      throw new Error(`WooCommerce קטגוריות - שגיאה (עמוד ${page}): ${wcRes.status} ${wcRes.statusText}`);
+    }
+    const batch = await wcRes.json();
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    cats.push(...batch);
+    if (batch.length < 100) break;
+    page++;
+    if (page > 50) break;
+  }
+  return cats;
+}
+
+function normalizeWooProduct(wp, categoryParentById) {
+  // אם למוצר יש כמה קטגוריות, מעדיפים את המדויקת ביותר (זו שיש לה הורה - כלומר תת-קטגוריה) על פני קטגוריה ראשית כללית
+  let categoryObj = null;
+  if (wp.categories && wp.categories.length) {
+    categoryObj = wp.categories.find((c) => categoryParentById && categoryParentById[c.id]) || wp.categories[0];
+  }
+  const category = (categoryObj && categoryObj.name) ? String(categoryObj.name).trim() : '';
   const image = (wp.images && wp.images[0] && wp.images[0].src) ? wp.images[0].src : '';
   const regularPrice = parseFloat(wp.regular_price || wp.price || 0) || 0;
   const salePrice = parseFloat(wp.sale_price || 0) || 0;
@@ -567,6 +594,24 @@ app.post('/sync/woocommerce', requireApiKey, async (req, res) => {
     const wooProducts = await fetchAllWooCommerceProducts();
     stats.foundOnSite = wooProducts.length;
 
+    // שלב 2.5: משיכת קטגוריות ובניית מבנה הורה/ילד (יין -> יין אדום), כדי לשמר תתי-קטגוריות ולא רשימה שטוחה
+    const wooCategories = await fetchAllWooCommerceCategories();
+    const categoryNameById = {};
+    wooCategories.forEach((c) => { categoryNameById[c.id] = String(c.name).trim(); });
+    const categoryParentById = {}; // { categoryId: parentCategoryId } - רק לקטגוריות שיש להן הורה אמיתי
+    const categoryHierarchyUpdates = {}; // { "שם תת-קטגוריה": "שם קטגוריית-על" } - בפורמט ש-Firebase שלנו כבר יודע לקרוא
+    wooCategories.forEach((c) => {
+      if (c.parent && c.parent !== 0 && categoryNameById[c.parent]) {
+        categoryParentById[c.id] = c.parent;
+        const childName = categoryNameById[c.id];
+        const parentName = categoryNameById[c.parent];
+        categoryHierarchyUpdates[skKey(childName)] = parentName;
+      }
+    });
+    if (Object.keys(categoryHierarchyUpdates).length) {
+      await db.ref(`retailCategoryHierarchy/${branch}`).update(categoryHierarchyUpdates);
+    }
+
     // שלב 3: התאמה - קודם לפי wooId (מזהה יציב), ואז לפי SKU כגיבוי
     const byWooId = {};
     const bySku = {};
@@ -579,7 +624,7 @@ app.post('/sync/woocommerce', requireApiKey, async (req, res) => {
     const matchedKeys = new Set();
 
     wooProducts.forEach((wp) => {
-      const norm = normalizeWooProduct(wp);
+      const norm = normalizeWooProduct(wp, categoryParentById);
       if (!norm.name || !norm.price) {
         stats.errors.push(`מוצר WooCommerce ${wp.id} דולג - חסר שם או מחיר תקין`);
         return;
