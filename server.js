@@ -736,6 +736,58 @@ app.get('/sync/status', requireApiKey, async (req, res) => {
   }
 });
 
+// ================= התראת פוש ללקוח על שינוי סטטוס - מוגן ב-API Key (נקרא רק מהניהול) =================
+//
+// POST /notify-order-status?api_key=...  body: { branch, orderId, status }
+const CUSTOMER_STATUS_MESSAGES = {
+  new: 'ההזמנה שלך התקבלה',
+  preparing: 'אנחנו מכינים את ההזמנה שלך',
+  ready: 'ההזמנה שלך מוכנה לאיסוף! 🎉',
+  collected: 'ההזמנה נאספה - תודה שקנית אצלנו',
+  cancelled: 'ההזמנה בוטלה',
+};
+app.post('/notify-order-status', requireApiKey, async (req, res) => {
+  try {
+    const { branch, orderId, status } = req.body || {};
+    if (!branch || !orderId || !status || !VALID_BRANCHES.includes(branch)) {
+      return res.status(400).json({ error: 'branch, orderId ו-status תקפים חובה' });
+    }
+    const tokensSnap = await db.ref(`customerPushTokens/${branch}/${orderId}`).once('value');
+    const tokensData = tokensSnap.val() || {};
+    const tokens = Object.values(tokensData).map((t) => t && t.token).filter(Boolean);
+
+    if (!tokens.length) {
+      return res.json({ ok: true, sent: 0, note: 'הלקוח לא הפעיל התראות להזמנה הזו' });
+    }
+
+    const message = {
+      notification: {
+        title: 'בית הבירה והיין',
+        body: CUSTOMER_STATUS_MESSAGES[status] || 'סטטוס ההזמנה שלך התעדכן',
+      },
+      tokens,
+    };
+    const result = await admin.messaging().sendEachForMulticast(message);
+
+    const invalidTokens = [];
+    result.responses.forEach((r, i) => {
+      if (!r.success && r.error && ['messaging/invalid-registration-token', 'messaging/registration-token-not-registered'].includes(r.error.code)) {
+        invalidTokens.push(tokens[i]);
+      }
+    });
+    if (invalidTokens.length) {
+      const cleanup = {};
+      invalidTokens.forEach((t) => { cleanup[skKey(t)] = null; });
+      await db.ref(`customerPushTokens/${branch}/${orderId}`).update(cleanup);
+    }
+
+    res.json({ ok: true, sent: result.successCount, failed: result.failureCount });
+  } catch (err) {
+    console.error('POST /notify-order-status error:', err.message);
+    res.status(200).json({ ok: false, error: err.message });
+  }
+});
+
 // ================= טיפול בשגיאות כלליות =================
 
 app.use((req, res) => {
