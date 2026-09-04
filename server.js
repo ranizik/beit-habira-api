@@ -177,6 +177,94 @@ app.post('/payments/webhook', express.json(), async (req, res) => {
 });
 
 // ================= התראת פוש על הזמנה חדשה - ציבורי (נקרא מהלקוח מיד אחרי יצירת הזמנה) =================
+// ================= יצירת הזמנה - כל התמחור מחושב כאן, בשרת, לא נסמך על שום מחיר שהלקוח שלח =================
+// הלקוח שולח רק barcode+qty לכל פריט. השרת שולף את הקטלוג האמיתי ואת סטטוס המועדון האמיתי,
+// ומחשב את המחיר בעצמו - כך שאי אפשר לזייף isClubPrice/unitPrice מהדפדפן.
+function isPromoActiveServer(promo) {
+  if (!promo || !promo.type) return false;
+  const now = Date.now();
+  if (promo.from && new Date(promo.from).getTime() > now) return false;
+  if (promo.to && new Date(promo.to).getTime() < now) return false;
+  return true;
+}
+// POST /create-order  body: { branch, items:[{barcode,qty}], pickupDay, pickupSlot, customerName, customerPhone, marketingConsent, payNow }
+app.post('/create-order', express.json(), async (req, res) => {
+  try {
+    const { branch, items, pickupDay, pickupSlot, customerName, customerPhone, marketingConsent, payNow } = req.body || {};
+    if (!branch || !VALID_BRANCHES.includes(branch)) return res.status(400).json({ error: 'branch לא תקף' });
+    if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'items חובה' });
+    if (!pickupSlot) return res.status(400).json({ error: 'pickupSlot חובה' });
+    if (!customerName || !String(customerName).trim()) return res.status(400).json({ error: 'customerName חובה' });
+    const phoneDigits = String(customerPhone || '').replace(/\D/g, '');
+    if (phoneDigits.length < 9) return res.status(400).json({ error: 'customerPhone לא תקין' });
+
+    const retailSnap = await db.ref(`retail/${branch}`).once('value');
+    const retailData = retailSnap.val() || {};
+
+    // חברות מועדון אמיתית - נבדקת כאן, לא נסמכים על שום דגל שהלקוח שלח
+    const memberSnap = await db.ref(`clubMembers/${skKey(phoneDigits)}`).once('value');
+    const memberData = memberSnap.val();
+    const isClubMember = !!(memberData && memberData.active !== false);
+
+    const orderItems = [];
+    for (const reqItem of items) {
+      const barcode = reqItem && reqItem.barcode;
+      const qty = parseInt(reqItem && reqItem.qty, 10);
+      if (!barcode || !qty || qty <= 0) continue;
+      const product = retailData[barcode];
+      if (!product || !(product.price > 0) || product.inStock === false) {
+        return res.status(409).json({ error: `המוצר "${product ? product.name : barcode}" כבר לא זמין`, unavailableBarcode: barcode, unavailableName: product ? product.name : barcode });
+      }
+      const regularPrice = product.price || 0;
+      let priceAfterPromo = regularPrice;
+      if (isPromoActiveServer(product.promo)) {
+        if (product.promo.type === 'pct') priceAfterPromo = priceAfterPromo * (1 - (product.promo.val || 0) / 100);
+        else if (product.promo.type === 'fixed') priceAfterPromo = product.promo.val || priceAfterPromo;
+      }
+      const clubPrice = product.clubPrice > 0 ? product.clubPrice : null;
+      const useClubPrice = !!(isClubMember && clubPrice && clubPrice < priceAfterPromo);
+      const appliedPrice = useClubPrice ? clubPrice : priceAfterPromo;
+
+      let lineTotal;
+      if (product.promo && product.promo.type === 'bundle' && isPromoActiveServer(product.promo) && product.promo.qty > 0) {
+        const groups = Math.floor(qty / product.promo.qty);
+        const remainder = qty % product.promo.qty;
+        lineTotal = groups * product.promo.val + remainder * regularPrice;
+      } else {
+        lineTotal = appliedPrice * qty;
+      }
+
+      orderItems.push({
+        barcode, name: product.name, qty,
+        unitPrice: appliedPrice, // שם השדה נשאר תואם למה שהקוד הקיים (מסך סטטוס, עריכת הזמנה) כבר קורא
+        lineTotal,
+        regularPrice, clubPrice: clubPrice || null,
+        appliedPrice, isClubPrice: useClubPrice,
+      });
+    }
+    if (!orderItems.length) return res.status(400).json({ error: 'אין פריטים תקפים בהזמנה' });
+
+    const totalItems = orderItems.reduce((s, it) => s + it.qty, 0);
+    const totalAmount = orderItems.reduce((s, it) => s + it.lineTotal, 0);
+
+    const order = {
+      branch, items: orderItems, totalItems, totalAmount,
+      pickupDay, pickupSlot,
+      customerName: String(customerName).trim(), customerPhone: phoneDigits,
+      status: 'new', paymentStatus: payNow ? 'pending' : 'pay_at_pickup',
+      createdAt: Date.now(), createdAtISO: new Date().toISOString(),
+      marketingConsent: !!marketingConsent,
+    };
+    if (isClubMember) order.clubMemberPhone = phoneDigits;
+
+    const ref = await db.ref(`pickupOrders/${branch}`).push(order);
+    res.json({ ok: true, orderId: ref.key, order });
+  } catch (err) {
+    console.error('POST /create-order error:', err.message);
+    res.status(500).json({ error: 'יצירת ההזמנה נכשלה, נסה שוב', details: err.message });
+  }
+});
+
 //
 // למה ציבורי ולא מוגן ב-API Key: הלקוח עצמו (לא admin) הוא זה שיוצר את ההזמנה ומודיע עליה.
 // ה-endpoint רק שולח התראה - לא חושף/משנה נתונים רגישים, ומאמת שההזמנה אכן קיימת ב-Firebase לפני השליחה.
@@ -195,7 +283,8 @@ app.post('/notify-new-order', express.json(), async (req, res) => {
 
     const tokensSnap = await db.ref(`adminPushTokens/${branch}`).once('value');
     const tokensData = tokensSnap.val() || {};
-    const tokens = Object.values(tokensData).map((t) => t && t.token).filter(Boolean);
+    const entries = Object.entries(tokensData).filter(([k, t]) => t && t.token); // [deviceKey, {token,...}]
+    const tokens = entries.map(([k, t]) => t.token);
 
     if (!tokens.length) {
       return res.json({ ok: true, sent: 0, note: 'אין מכשירי admin רשומים להתראות בסניף הזה' });
@@ -206,21 +295,47 @@ app.post('/notify-new-order', express.json(), async (req, res) => {
         title: 'הזמנה חדשה 🔔',
         body: `${order.customerName || 'לקוח'} · ₪${(order.totalAmount || 0).toFixed(2)} · ${(order.items || []).length} פריטים`,
       },
+      data: { orderId: String(orderId), branch: String(branch), type: 'new-order' },
       tokens,
     };
     const result = await admin.messaging().sendEachForMulticast(message);
 
     // מנקים מזהי מכשיר שכבר לא תקפים (המשתמש הסיר הרשאה/מחק את האפליקציה) כדי לא לצבור זבל
-    const invalidTokens = [];
+    const invalidKeys = [];
     result.responses.forEach((r, i) => {
       if (!r.success && r.error && ['messaging/invalid-registration-token', 'messaging/registration-token-not-registered'].includes(r.error.code)) {
-        invalidTokens.push(tokens[i]);
+        invalidKeys.push(entries[i][0]); // המפתח האמיתי (deviceId), לא הטוקן
       }
     });
-    if (invalidTokens.length) {
+    if (invalidKeys.length) {
       const cleanup = {};
-      invalidTokens.forEach((t) => { cleanup[skKey(t)] = null; });
+      invalidKeys.forEach((k) => { cleanup[k] = null; });
       await db.ref(`adminPushTokens/${branch}`).update(cleanup);
+    }
+
+    // עדכון כרטיס לקוח (customerProfiles) - עכשיו נעשה כאן, בצד השרת, במקום שהלקוח יכתוב ישירות ל-Firebase.
+    // זה מאפשר לנעול את הנתיב הזה מכתיבה אנונימית ישירה בלי לשבור את התכונה עצמה.
+    try {
+      const phoneKey = skKey(order.customerPhone || '');
+      if (phoneKey) {
+        const retailSnap = await db.ref(`retail/${branch}`).once('value');
+        const retailData = retailSnap.val() || {};
+        const updates = {
+          name: order.customerName || '',
+          phone: order.customerPhone || '',
+          lastOrderAt: Date.now(),
+          totalOrders: admin.database.ServerValue.increment(1),
+          totalSpent: admin.database.ServerValue.increment(order.totalAmount || 0),
+        };
+        (order.items || []).forEach((item) => {
+          const product = retailData[item.barcode];
+          const category = product && product.category;
+          if (category) updates[`categoryCounts/${skKey(category)}`] = admin.database.ServerValue.increment(item.qty || 1);
+        });
+        await db.ref(`customerProfiles/${branch}/${phoneKey}`).update(updates);
+      }
+    } catch (profileErr) {
+      console.error('עדכון כרטיס לקוח נכשל (ההזמנה עצמה תקינה):', profileErr.message);
     }
 
     res.json({ ok: true, sent: result.successCount, failed: result.failureCount });
@@ -742,6 +857,7 @@ app.get('/sync/status', requireApiKey, async (req, res) => {
 const CUSTOMER_STATUS_MESSAGES = {
   new: 'ההזמנה שלך התקבלה',
   preparing: 'אנחנו מכינים את ההזמנה שלך',
+  missing_product: 'חסר מוצר בהזמנה שלך - אנחנו בודקים את זה',
   ready: 'ההזמנה שלך מוכנה לאיסוף! 🎉',
   collected: 'ההזמנה נאספה - תודה שקנית אצלנו',
   cancelled: 'ההזמנה בוטלה',
@@ -757,7 +873,8 @@ app.post('/notify-order-status', requireApiKey, async (req, res) => {
     }
     const tokensSnap = await db.ref(`customerPushTokens/${branch}/${orderId}`).once('value');
     const tokensData = tokensSnap.val() || {};
-    const tokens = Object.values(tokensData).map((t) => t && t.token).filter(Boolean);
+    const entries = Object.entries(tokensData).filter(([k, t]) => t && t.token);
+    const tokens = entries.map(([k, t]) => t.token);
 
     if (!tokens.length) {
       return res.json({ ok: true, sent: 0, note: 'הלקוח לא הפעיל התראות להזמנה הזו' });
@@ -768,25 +885,63 @@ app.post('/notify-order-status', requireApiKey, async (req, res) => {
         title: 'בית הבירה והיין',
         body: customMessage || CUSTOMER_STATUS_MESSAGES[status] || 'סטטוס ההזמנה שלך התעדכן',
       },
+      data: { orderId: String(orderId), branch: String(branch), type: 'order-status' },
       tokens,
     };
     const result = await admin.messaging().sendEachForMulticast(message);
 
-    const invalidTokens = [];
+    const invalidKeys = [];
     result.responses.forEach((r, i) => {
       if (!r.success && r.error && ['messaging/invalid-registration-token', 'messaging/registration-token-not-registered'].includes(r.error.code)) {
-        invalidTokens.push(tokens[i]);
+        invalidKeys.push(entries[i][0]);
       }
     });
-    if (invalidTokens.length) {
+    if (invalidKeys.length) {
       const cleanup = {};
-      invalidTokens.forEach((t) => { cleanup[skKey(t)] = null; });
+      invalidKeys.forEach((k) => { cleanup[k] = null; });
       await db.ref(`customerPushTokens/${branch}/${orderId}`).update(cleanup);
     }
 
     res.json({ ok: true, sent: result.successCount, failed: result.failureCount });
   } catch (err) {
     console.error('POST /notify-order-status error:', err.message);
+    res.status(200).json({ ok: false, error: err.message });
+  }
+});
+
+// ================= רישום הסכמה שיווקית - ציבורי (לקוח אנונימי), אבל דרך השרת לא כתיבה ישירה =================
+// טוקן ה-FCM עצמו חייב להיווצר בדפדפן (API של הדפדפן), אבל השמירה ל-Firebase עוברת כאן,
+// כדי שהלקוח לא יצטרך הרשאת כתיבה ישירה לנתיב marketingPushTokens.
+// POST /register-marketing-token  body: { branch, phone, deviceId, token }
+app.post('/register-marketing-token', express.json(), async (req, res) => {
+  try {
+    const { branch, phone, deviceId, token } = req.body || {};
+    if (!branch || !phone || !deviceId || !token || !VALID_BRANCHES.includes(branch)) {
+      return res.status(400).json({ error: 'branch, phone, deviceId ו-token תקפים חובה' });
+    }
+    await db.ref(`marketingPushTokens/${branch}/${skKey(phone)}/${deviceId}`).set({ token, consentedAt: Date.now() });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /register-marketing-token error:', err.message);
+    res.status(200).json({ ok: false, error: err.message }); // לא נכשיל את חוויית הלקוח בגלל זה
+  }
+});
+
+// אותו עיקרון - התראה על הזמנה ספציפית ("קבל התראה כשההזמנה מוכנה")
+// POST /register-order-token  body: { branch, orderId, deviceId, token }
+app.post('/register-order-token', express.json(), async (req, res) => {
+  try {
+    const { branch, orderId, deviceId, token } = req.body || {};
+    if (!branch || !orderId || !deviceId || !token || !VALID_BRANCHES.includes(branch)) {
+      return res.status(400).json({ error: 'branch, orderId, deviceId ו-token תקפים חובה' });
+    }
+    // מוודאים שההזמנה אכן קיימת - לא נרשום טוקן להזמנה שלא קיימת
+    const orderSnap = await db.ref(`pickupOrders/${branch}/${orderId}`).once('value');
+    if (!orderSnap.val()) return res.status(404).json({ error: 'הזמנה לא נמצאה' });
+    await db.ref(`customerPushTokens/${branch}/${orderId}/${deviceId}`).set({ token, createdAt: Date.now() });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /register-order-token error:', err.message);
     res.status(200).json({ ok: false, error: err.message });
   }
 });
