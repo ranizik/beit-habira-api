@@ -215,7 +215,22 @@ app.post('/notify-new-order', express.json(), async (req, res) => {
 
     // ⭐⭐⭐ החזר מיד - אל תחכה לעדכון profile! ⭐⭐⭐
     res.json({ ok: true, sent: result.successCount, failed: result.failureCount });
+res.json({ ok: true, sent: result.successCount, failed: result.failureCount });
 
+(async () => {
+  try {
+    const phoneKey = skKey(order.customerPhone || '');
+    if (phoneKey) {
+      await db.ref(`customerProfiles/${branch}/${phoneKey}`).update({
+        name: order.customerName || '',
+        phone: order.customerPhone || '',
+        lastOrderAt: Date.now(),
+      });
+    }
+  } catch (e) {
+    console.error('profile update failed:', e.message);
+  }
+})();
     // ⭐⭐⭐ עדכון profile ברקע - לא מחכים עליו! ⭐⭐⭐
     (async () => {
       try {
