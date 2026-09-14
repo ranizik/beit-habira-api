@@ -345,8 +345,8 @@ app.post('/cancel-order', express.json(), async (req, res) => {
 // למה ציבורי ולא מוגן ב-API Key: הלקוח עצמו (לא admin) הוא זה שיוצר את ההזמנה ומודיע עליה.
 // ה-endpoint רק שולח התראה - לא חושף/משנה נתונים רגישים, ומאמת שההזמנה אכן קיימת ב-Firebase לפני השליחה.
 //
-// POST /notify-new-order  body: { branch, orderId }
-app.post('/notify-new-order', express.json(), async (req, res) => {
+// POST /notify-new-order?api_key=...  body: { branch, orderId }
+app.post('/notify-new-order', requireApiKey, async (req, res) => {
   try {
     const { branch, orderId } = req.body || {};
     if (!branch || !orderId || !VALID_BRANCHES.includes(branch)) {
