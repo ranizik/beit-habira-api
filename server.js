@@ -349,6 +349,7 @@ app.post('/cancel-order', express.json(), async (req, res) => {
 app.post('/notify-new-order', requireApiKey, async (req, res) => {
   try {
     const { branch, orderId } = req.body || {};
+    console.log('📢 [/notify-new-order] Received:', { branch, orderId });
     if (!branch || !orderId || !VALID_BRANCHES.includes(branch)) {
       return res.status(400).json({ error: 'branch ו-orderId תקפים חובה' });
     }
@@ -363,6 +364,7 @@ app.post('/notify-new-order', requireApiKey, async (req, res) => {
     const tokens = entries.map(([k, t]) => t.token);
 
     if (!tokens.length) {
+    console.log('📝 Found', tokens.length, 'admin tokens');
       return res.json({ ok: true, sent: 0, note: 'אין מכשירי admin רשומים להתראות בסניף הזה' });
     }
 
@@ -373,6 +375,7 @@ app.post('/notify-new-order', requireApiKey, async (req, res) => {
       },
       data: { orderId: String(orderId), branch: String(branch), type: 'new-order' },
       tokens,
+    console.log('📤 Sending FCM...');
     };
     const result = await admin.messaging().sendEachForMulticast(message);
 
@@ -388,6 +391,7 @@ app.post('/notify-new-order', requireApiKey, async (req, res) => {
       invalidKeys.forEach((k) => { cleanup[k] = null; });
       await db.ref(`adminPushTokens/${branch}`).update(cleanup);
     }
+    console.log('✅ Sent:', result.successCount, 'Failed:', result.failureCount);
 
     // עדכון כרטיס לקוח (customerProfiles) - עכשיו נעשה כאן, בצד השרת, במקום שהלקוח יכתוב ישירות ל-Firebase.
     // זה מאפשר לנעול את הנתיב הזה מכתיבה אנונימית ישירה בלי לשבור את התכונה עצמה.
