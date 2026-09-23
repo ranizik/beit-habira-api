@@ -31,7 +31,13 @@ const VALID_BRANCHES = ['shfayim', 'tel_mond'];
 // ---------- אתחול Firebase ----------
 let serviceAccount;
 try {
-  serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
+  serviceAccount = JSON.parse(process.env.FIREBASE_KEY.trim());
+  // הדבקה בממשק של Render לפעמים משאירה את שורות המפתח כ-"\\n" מילולי במקום ירידת שורה אמיתית -> חתימה לא תקפה
+  if (serviceAccount.private_key && serviceAccount.private_key.includes('\\n')) {
+    serviceAccount.private_key = serviceAccount.private_key.replace(/\\+n/g, '\n');
+  }
+  // לוג אבחון בלבד - מזהה המפתח (לא המפתח עצמו) כדי לוודא שנטען המפתח הנכון
+  console.log('🔑 Firebase key:', serviceAccount.project_id, '| key id', String(serviceAccount.private_key_id || '').slice(0, 8), '| pem ok:', /-----BEGIN PRIVATE KEY-----\n/.test(serviceAccount.private_key || ''));
 } catch (err) {
   console.error('❌ FIREBASE_KEY אינו JSON תקין:', err.message);
   process.exit(1);
