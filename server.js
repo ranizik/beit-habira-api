@@ -15,6 +15,8 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const admin = require('firebase-admin');
 const ExcelJS = require('exceljs');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 
 // ---------- בדיקת משתני סביבה ----------
 const REQUIRED_ENV = ['FIREBASE_KEY', 'FIREBASE_DB_URL', 'API_KEY'];
@@ -44,15 +46,18 @@ const db = admin.database();
 
 // ---------- Express App ----------
 const app = express();
+// Render מריץ מאחורי proxy - בלי זה כל הלקוחות נראים כ-IP אחד וה-Rate Limit חוסם את כולם יחד
+app.set('trust proxy', 1);
 app.use(cors());
-app.use(express.json({ limit: '5mb' }));
+// rawBody נשמר לצורך אימות חתימת הוובהוק של חברת הסליקה (HMAC מחושב על הגוף המקורי, לא על ה-JSON המפוענח)
+app.use(express.json({ limit: '5mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 
 // לוגים בסיסיים לכל בקשה
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     console.log(
-      `${new Date().toISOString()} ${req.method} ${req.originalUrl} -> ${res.statusCode} (${Date.now() - start}ms)`
+      `${new Date().toISOString()} ${req.method} ${req.originalUrl.replace(/([?&]api_key=)[^&]*/i, '$1***')} -> ${res.statusCode} (${Date.now() - start}ms)`
     );
   });
   next();
@@ -70,12 +75,34 @@ app.use(limiter);
 
 // אימות API Key - מתקבל גם כ-header וגם כפרמטר בכתובת (?api_key=...) לצורך תאימות
 // עם מערכות שלא תומכות בשליחת headers מותאמים (כמו קישור ישיר להורדת קובץ).
-function requireApiKey(req, res, next) {
+//
+// בנוסף: פאנל הניהול באפליקציה שולח טוקן התחברות של Firebase (Authorization: Bearer <idToken>)
+// במקום מפתח קבוע - כך שהמפתח לא צריך להופיע בקוד הגלוי של האתר.
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@beit-habira-retail.local').toLowerCase();
+
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+}
+
+async function requireApiKey(req, res, next) {
   const key = req.headers['x-api-key'] || req.query.api_key;
-  if (!key || key !== process.env.API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized - API key חסר או שגוי' });
+  if (key && safeEqual(key, process.env.API_KEY)) return next();
+
+  const authHeader = req.headers.authorization || '';
+  if (authHeader.startsWith('Bearer ')) {
+    try {
+      const decoded = await admin.auth().verifyIdToken(authHeader.slice(7));
+      if (decoded && String(decoded.email || '').toLowerCase() === ADMIN_EMAIL) {
+        req.adminUid = decoded.uid;
+        return next();
+      }
+    } catch (err) {
+      // טוקן לא תקף/פג תוקף - נופלים ל-401 למטה
+    }
   }
-  next();
+  return res.status(401).json({ error: 'Unauthorized - API key חסר או שגוי' });
 }
 
 // ---------- Health Check (ללא אימות) ----------
@@ -155,7 +182,22 @@ app.post('/payments/create-link', express.json(), async (req, res) => {
 app.post('/payments/webhook', express.json(), async (req, res) => {
   try {
     const body = req.body || {};
-    console.log('PayPlus webhook received:', JSON.stringify(body));
+
+    // אימות חתימה: PayPlus שולחים header בשם hash = Base64(HMAC-SHA256(גוף הבקשה, SECRET_KEY)).
+    // TODO בהפעלה: לוודא מול עמוד התיעוד בדשבורד PayPlus ששם ה-header והקידוד זהים.
+    if (!process.env.PAYPLUS_SECRET_KEY) {
+      console.warn('PayPlus webhook נדחה - סליקה לא מוגדרת');
+      return res.status(503).json({ received: false });
+    }
+    const expected = crypto.createHmac('sha256', process.env.PAYPLUS_SECRET_KEY)
+      .update(req.rawBody || Buffer.from(JSON.stringify(body))).digest('base64');
+    const received = req.headers.hash || '';
+    if (!received || !safeEqual(received, expected)) {
+      console.warn('PayPlus webhook נדחה - חתימה לא תקפה');
+      return res.status(401).json({ received: false });
+    }
+    // לא מדפיסים את כל הגוף ללוג (עלול לכלול פרטי משלם)
+    console.log('PayPlus webhook received for:', body.more_info || (body.data && body.data.more_info) || '?');
 
     // TODO: לבדוק מול פלט אמיתי מהם את שמות השדות המדויקים (status_code/transaction_type וכו')
     const moreInfo = body.more_info || (body.data && body.data.more_info) || '';
@@ -163,6 +205,9 @@ app.post('/payments/webhook', express.json(), async (req, res) => {
     const isApproved = body.transaction_type === 'Approved' || body.status_code === '000' || body.status === 'approved';
 
     if (branch && orderId && VALID_BRANCHES.includes(branch)) {
+      // Idempotency: הזמנה שכבר סומנה 'paid' לא נדרסת ע"י וובהוק כפול/מאוחר (למשל 'failed' שמגיע אחרי 'paid')
+      const current = (await db.ref(`pickupOrders/${branch}/${orderId}/paymentStatus`).once('value')).val();
+      if (current === 'paid') return res.json({ received: true, duplicate: true });
       await db.ref(`pickupOrders/${branch}/${orderId}`).update({
         paymentStatus: isApproved ? 'paid' : 'failed',
         paymentUpdatedAt: Date.now(),
@@ -187,10 +232,66 @@ function isPromoActiveServer(promo) {
   if (promo.to && new Date(promo.to).getTime() < now) return false;
   return true;
 }
-// POST /create-order  body: { branch, items:[{barcode,qty}], pickupDay, pickupSlot, customerName, customerPhone, marketingConsent, payNow }
+// ================= מייל אישור הזמנה (Gmail SMTP) =================
+// משתני סביבה ב-Render: GMAIL_USER (כתובת), GMAIL_PASS (סיסמת אפליקציה בת 16 תווים מ-Google).
+// אם הם לא מוגדרים - המייל פשוט לא נשלח, ההזמנה ממשיכה כרגיל.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const BRANCH_NAMES = { shfayim: 'שפיים', tel_mond: 'תל מונד' };
+const PAYMENT_STATUS_NAMES = { pending: 'ממתין לתשלום אונליין', paid: 'שולם', pay_at_pickup: 'תשלום באיסוף', failed: 'התשלום נכשל' };
+let mailTransport = null;
+function getMailTransport() {
+  if (!process.env.GMAIL_USER || !process.env.GMAIL_PASS) return null;
+  if (!mailTransport) {
+    mailTransport = nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS },
+    });
+  }
+  return mailTransport;
+}
+function escHtml(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+async function sendOrderConfirmationEmail(orderId, order) {
+  const transport = getMailTransport();
+  if (!transport) {
+    console.log('מייל אישור לא נשלח - GMAIL_USER/GMAIL_PASS לא מוגדרים');
+    return;
+  }
+  const shortId = String(orderId).slice(-6).toUpperCase();
+  const rows = (order.items || []).map((it) => `
+    <tr>
+      <td style="padding:8px;border-bottom:1px solid #eee;">${escHtml(it.name)}</td>
+      <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">${it.qty}</td>
+      <td style="padding:8px;border-bottom:1px solid #eee;text-align:left;">₪${Number(it.lineTotal || 0).toFixed(2)}</td>
+    </tr>`).join('');
+  const html = `<!DOCTYPE html><html dir="rtl" lang="he"><body style="margin:0;background:#f5f3ef;font-family:Arial,sans-serif;direction:rtl;">
+  <div style="max-width:560px;margin:0 auto;background:#fff;padding:24px;">
+    <h2 style="margin:0 0 6px;">תודה על ההזמנה, ${escHtml(order.customerName)}!</h2>
+    <p style="margin:0 0 16px;color:#555;">ההזמנה התקבלה בבית הבירה והיין - סניף ${escHtml(BRANCH_NAMES[order.branch] || order.branch)}</p>
+    <p style="margin:0 0 4px;"><b>מספר הזמנה:</b> ${escHtml(shortId)}</p>
+    <p style="margin:0 0 4px;"><b>איסוף:</b> ${escHtml(order.pickupDay || '')} ${escHtml(order.pickupSlot || '')}</p>
+    <p style="margin:0 0 16px;"><b>תשלום:</b> ${escHtml(PAYMENT_STATUS_NAMES[order.paymentStatus] || order.paymentStatus)}</p>
+    <table style="width:100%;border-collapse:collapse;font-size:14px;">
+      <tr style="background:#f0ece4;"><th style="padding:8px;text-align:right;">מוצר</th><th style="padding:8px;">כמות</th><th style="padding:8px;text-align:left;">מחיר</th></tr>
+      ${rows}
+    </table>
+    <p style="font-size:17px;margin:16px 0;"><b>סה"כ: ₪${Number(order.totalAmount || 0).toFixed(2)}</b></p>
+    <p style="color:#888;font-size:12px;margin-top:24px;">⚠️ צריכה מופרזת של אלכוהול מסכנת חיים ומזיקה לבריאות!</p>
+  </div></body></html>`;
+  await transport.sendMail({
+    from: `"בית הבירה והיין" <${process.env.GMAIL_USER}>`,
+    to: order.customerEmail,
+    subject: `אישור הזמנה ${shortId} - בית הבירה והיין`,
+    html,
+  });
+  console.log('📧 מייל אישור נשלח להזמנה', shortId);
+}
+
+// POST /create-order  body: { branch, items:[{barcode,qty}], pickupDay, pickupSlot, customerName, customerPhone, customerEmail, marketingConsent, payNow }
 app.post('/create-order', express.json(), async (req, res) => {
   try {
-    const { branch, items, pickupDay, pickupSlot, customerName, customerPhone, marketingConsent, payNow } = req.body || {};
+    const { branch, items, pickupDay, pickupSlot, customerName, customerPhone, customerEmail, marketingConsent, payNow } = req.body || {};
     if (!branch || !VALID_BRANCHES.includes(branch)) return res.status(400).json({ error: 'branch לא תקף' });
     if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'items חובה' });
     if (!pickupSlot) return res.status(400).json({ error: 'pickupSlot חובה' });
@@ -211,6 +312,7 @@ app.post('/create-order', express.json(), async (req, res) => {
       const barcode = reqItem && reqItem.barcode;
       const qty = parseInt(reqItem && reqItem.qty, 10);
       if (!barcode || !qty || qty <= 0) continue;
+      if (qty > 999) return res.status(400).json({ error: 'כמות לא תקינה' });
       const product = retailData[barcode];
       if (!product || !(product.price > 0) || product.inStock === false) {
         return res.status(409).json({ error: `המוצר "${product ? product.name : barcode}" כבר לא זמין`, unavailableBarcode: barcode, unavailableName: product ? product.name : barcode });
@@ -245,7 +347,13 @@ app.post('/create-order', express.json(), async (req, res) => {
     if (!orderItems.length) return res.status(400).json({ error: 'אין פריטים תקפים בהזמנה' });
 
     const totalItems = orderItems.reduce((s, it) => s + it.qty, 0);
-    const totalAmount = orderItems.reduce((s, it) => s + it.lineTotal, 0);
+    // עיגול לאגורות - אחרת הנחת אחוזים יוצרת סכומים כמו 89.99999 (מגיעים גם לסליקה ולמייל)
+    orderItems.forEach((it) => {
+      it.unitPrice = Math.round(it.unitPrice * 100) / 100;
+      it.appliedPrice = it.unitPrice;
+      it.lineTotal = Math.round(it.lineTotal * 100) / 100;
+    });
+    const totalAmount = Math.round(orderItems.reduce((s, it) => s + it.lineTotal, 0) * 100) / 100;
 
     const order = {
       branch, items: orderItems, totalItems, totalAmount,
@@ -256,9 +364,16 @@ app.post('/create-order', express.json(), async (req, res) => {
       marketingConsent: !!marketingConsent,
     };
     if (isClubMember) order.clubMemberPhone = phoneDigits;
+    const email = String(customerEmail || '').trim().toLowerCase();
+    if (email && EMAIL_RE.test(email)) order.customerEmail = email;
 
     const ref = await db.ref(`pickupOrders/${branch}`).push(order);
     res.json({ ok: true, orderId: ref.key, order });
+
+    // מייל אישור - אחרי שההזמנה נשמרה ואחרי שהלקוח קיבל תשובה. כישלון מייל לא משפיע על ההזמנה.
+    if (order.customerEmail) {
+      sendOrderConfirmationEmail(ref.key, order).catch((e) => console.error('מייל אישור נכשל (ההזמנה תקינה):', e.message));
+    }
   } catch (err) {
     console.error('POST /create-order error:', err.message);
     res.status(500).json({ error: 'יצירת ההזמנה נכשלה, נסה שוב', details: err.message });
@@ -270,9 +385,13 @@ app.post('/create-order', express.json(), async (req, res) => {
 // הלקוח יכול לבטל הזמנה רק אם היא בסטטוס 'new' (טרם התחיל טיפול בה)
 app.post('/cancel-order', express.json(), async (req, res) => {
   try {
-    const { branch, orderId } = req.body || {};
+    const { branch, orderId, phoneLast4 } = req.body || {};
     if (!branch || !orderId || !VALID_BRANCHES.includes(branch)) {
       return res.status(400).json({ error: 'branch ו-orderId תקפים חובה' });
+    }
+    const last4 = String(phoneLast4 || '').replace(/\D/g, '');
+    if (last4.length !== 4) {
+      return res.status(400).json({ error: 'יש להזין 4 ספרות אחרונות של הטלפון' });
     }
 
     const orderRef = db.ref(`pickupOrders/${branch}/${orderId}`);
@@ -281,6 +400,11 @@ app.post('/cancel-order', express.json(), async (req, res) => {
 
     if (!order) {
       return res.status(404).json({ error: 'הזמנה לא נמצאה' });
+    }
+
+    // אימות טלפון - רק מי שיודע את מספר הטלפון שבהזמנה יכול לבטל אותה
+    if (!safeEqual(String(order.customerPhone || '').slice(-4), last4)) {
+      return res.status(403).json({ error: 'מספר הטלפון לא תואם להזמנה' });
     }
 
     // ביטול מותר רק בסטטוס 'new'
@@ -346,7 +470,9 @@ app.post('/cancel-order', express.json(), async (req, res) => {
 // ה-endpoint רק שולח התראה - לא חושף/משנה נתונים רגישים, ומאמת שההזמנה אכן קיימת ב-Firebase לפני השליחה.
 //
 // POST /notify-new-order?api_key=...  body: { branch, orderId }
-app.post('/notify-new-order', requireApiKey, async (req, res) => {
+// ציבורי - בלי API Key (המפתח לא אמור להיות בקוד של הלקוח). ההגנה: ההזמנה חייבת להיות קיימת,
+// חדשה (עד 30 דקות), ולא קיבלה כבר התראה - כך שאי אפשר להציף את הניהול בהתראות או לספור רכישה פעמיים בכרטיס הלקוח.
+app.post('/notify-new-order', async (req, res) => {
   try {
     const { branch, orderId } = req.body || {};
     console.log('📢 [/notify-new-order] Received:', { branch, orderId });
@@ -357,14 +483,19 @@ app.post('/notify-new-order', requireApiKey, async (req, res) => {
     const orderSnap = await db.ref(`pickupOrders/${branch}/${orderId}`).once('value');
     const order = orderSnap.val();
     if (!order) return res.status(404).json({ error: 'הזמנה לא נמצאה' });
+    if (order.adminNotifiedAt) return res.json({ ok: true, sent: 0, note: 'כבר נשלחה התראה להזמנה הזו' });
+    if (!order.createdAt || Date.now() - order.createdAt > 30 * 60 * 1000) {
+      return res.status(409).json({ error: 'ההזמנה ישנה מדי להתראה' });
+    }
+    await db.ref(`pickupOrders/${branch}/${orderId}`).update({ adminNotifiedAt: Date.now() });
 
     const tokensSnap = await db.ref(`adminPushTokens/${branch}`).once('value');
     const tokensData = tokensSnap.val() || {};
     const entries = Object.entries(tokensData).filter(([k, t]) => t && t.token); // [deviceKey, {token,...}]
     const tokens = entries.map(([k, t]) => t.token);
 
-    if (!tokens.length) {
     console.log('📝 Found', tokens.length, 'admin tokens');
+    if (!tokens.length) {
       return res.json({ ok: true, sent: 0, note: 'אין מכשירי admin רשומים להתראות בסניף הזה' });
     }
 
@@ -375,8 +506,8 @@ app.post('/notify-new-order', requireApiKey, async (req, res) => {
       },
       data: { orderId: String(orderId), branch: String(branch), type: 'new-order' },
       tokens,
-    console.log('📤 Sending FCM...');
     };
+    console.log('📤 Sending FCM...');
     const result = await admin.messaging().sendEachForMulticast(message);
 
     // מנקים מזהי מכשיר שכבר לא תקפים (המשתמש הסיר הרשאה/מחק את האפליקציה) כדי לא לצבור זבל
@@ -422,6 +553,44 @@ app.post('/notify-new-order', requireApiKey, async (req, res) => {
   } catch (err) {
     console.error('POST /notify-new-order error:', err.message);
     // לעולם לא נכשיל את יצירת ההזמנה בגלל שגיאת התראה - הלקוח כבר קיבל אישור הזמנה
+    res.status(200).json({ ok: false, error: err.message });
+  }
+});
+
+// (הועבר לכאן - לפני בדיקת ה-API Key - כי הלקוח קורא לנתיבים האלה בלי מפתח. קודם הם החזירו 401 והתראות ללקוחות לא נרשמו)
+// ================= רישום הסכמה שיווקית - ציבורי (לקוח אנונימי), אבל דרך השרת לא כתיבה ישירה =================
+// טוקן ה-FCM עצמו חייב להיווצר בדפדפן (API של הדפדפן), אבל השמירה ל-Firebase עוברת כאן,
+// כדי שהלקוח לא יצטרך הרשאת כתיבה ישירה לנתיב marketingPushTokens.
+// POST /register-marketing-token  body: { branch, phone, deviceId, token }
+app.post('/register-marketing-token', express.json(), async (req, res) => {
+  try {
+    const { branch, phone, deviceId, token } = req.body || {};
+    if (!branch || !phone || !deviceId || !token || !VALID_BRANCHES.includes(branch)) {
+      return res.status(400).json({ error: 'branch, phone, deviceId ו-token תקפים חובה' });
+    }
+    await db.ref(`marketingPushTokens/${branch}/${skKey(phone)}/${deviceId}`).set({ token, consentedAt: Date.now() });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /register-marketing-token error:', err.message);
+    res.status(200).json({ ok: false, error: err.message }); // לא נכשיל את חוויית הלקוח בגלל זה
+  }
+});
+
+// אותו עיקרון - התראה על הזמנה ספציפית ("קבל התראה כשההזמנה מוכנה")
+// POST /register-order-token  body: { branch, orderId, deviceId, token }
+app.post('/register-order-token', express.json(), async (req, res) => {
+  try {
+    const { branch, orderId, deviceId, token } = req.body || {};
+    if (!branch || !orderId || !deviceId || !token || !VALID_BRANCHES.includes(branch)) {
+      return res.status(400).json({ error: 'branch, orderId, deviceId ו-token תקפים חובה' });
+    }
+    // מוודאים שההזמנה אכן קיימת - לא נרשום טוקן להזמנה שלא קיימת
+    const orderSnap = await db.ref(`pickupOrders/${branch}/${orderId}`).once('value');
+    if (!orderSnap.val()) return res.status(404).json({ error: 'הזמנה לא נמצאה' });
+    await db.ref(`customerPushTokens/${branch}/${orderId}/${deviceId}`).set({ token, createdAt: Date.now() });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /register-order-token error:', err.message);
     res.status(200).json({ ok: false, error: err.message });
   }
 });
@@ -985,43 +1154,6 @@ app.post('/notify-order-status', requireApiKey, async (req, res) => {
     res.json({ ok: true, sent: result.successCount, failed: result.failureCount });
   } catch (err) {
     console.error('POST /notify-order-status error:', err.message);
-    res.status(200).json({ ok: false, error: err.message });
-  }
-});
-
-// ================= רישום הסכמה שיווקית - ציבורי (לקוח אנונימי), אבל דרך השרת לא כתיבה ישירה =================
-// טוקן ה-FCM עצמו חייב להיווצר בדפדפן (API של הדפדפן), אבל השמירה ל-Firebase עוברת כאן,
-// כדי שהלקוח לא יצטרך הרשאת כתיבה ישירה לנתיב marketingPushTokens.
-// POST /register-marketing-token  body: { branch, phone, deviceId, token }
-app.post('/register-marketing-token', express.json(), async (req, res) => {
-  try {
-    const { branch, phone, deviceId, token } = req.body || {};
-    if (!branch || !phone || !deviceId || !token || !VALID_BRANCHES.includes(branch)) {
-      return res.status(400).json({ error: 'branch, phone, deviceId ו-token תקפים חובה' });
-    }
-    await db.ref(`marketingPushTokens/${branch}/${skKey(phone)}/${deviceId}`).set({ token, consentedAt: Date.now() });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('POST /register-marketing-token error:', err.message);
-    res.status(200).json({ ok: false, error: err.message }); // לא נכשיל את חוויית הלקוח בגלל זה
-  }
-});
-
-// אותו עיקרון - התראה על הזמנה ספציפית ("קבל התראה כשההזמנה מוכנה")
-// POST /register-order-token  body: { branch, orderId, deviceId, token }
-app.post('/register-order-token', express.json(), async (req, res) => {
-  try {
-    const { branch, orderId, deviceId, token } = req.body || {};
-    if (!branch || !orderId || !deviceId || !token || !VALID_BRANCHES.includes(branch)) {
-      return res.status(400).json({ error: 'branch, orderId, deviceId ו-token תקפים חובה' });
-    }
-    // מוודאים שההזמנה אכן קיימת - לא נרשום טוקן להזמנה שלא קיימת
-    const orderSnap = await db.ref(`pickupOrders/${branch}/${orderId}`).once('value');
-    if (!orderSnap.val()) return res.status(404).json({ error: 'הזמנה לא נמצאה' });
-    await db.ref(`customerPushTokens/${branch}/${orderId}/${deviceId}`).set({ token, createdAt: Date.now() });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('POST /register-order-token error:', err.message);
     res.status(200).json({ ok: false, error: err.message });
   }
 });
