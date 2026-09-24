@@ -259,9 +259,10 @@ function escHtml(v) {
   return String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 async function sendOrderConfirmationEmail(orderId, order) {
-  const transport = getMailTransport();
-  if (!transport) {
-    console.log('מייל אישור לא נשלח - GMAIL_USER/GMAIL_PASS לא מוגדרים');
+  const useBrevo = !!process.env.BREVO_API_KEY;
+  const transport = useBrevo ? null : getMailTransport();
+  if (!useBrevo && !transport) {
+    console.log('מייל אישור לא נשלח - BREVO_API_KEY (או GMAIL_USER/GMAIL_PASS) לא מוגדרים');
     return;
   }
   const shortId = String(orderId).slice(-6).toUpperCase();
@@ -285,13 +286,26 @@ async function sendOrderConfirmationEmail(orderId, order) {
     <p style="font-size:17px;margin:16px 0;"><b>סה"כ: ₪${Number(order.totalAmount || 0).toFixed(2)}</b></p>
     <p style="color:#888;font-size:12px;margin-top:24px;">⚠️ צריכה מופרזת של אלכוהול מסכנת חיים ומזיקה לבריאות!</p>
   </div></body></html>`;
-  await transport.sendMail({
-    from: `"בית הבירה והיין" <${process.env.GMAIL_USER}>`,
-    to: order.customerEmail,
-    subject: `אישור הזמנה ${shortId} - בית הבירה והיין`,
-    html,
-  });
-  console.log('📧 מייל אישור נשלח להזמנה', shortId);
+  const subject = `אישור הזמנה ${shortId} - בית הבירה והיין`;
+  if (useBrevo) {
+    // Brevo דרך HTTPS (פורט 443) - Render חוסם SMTP בשרת החינמי, אז Gmail ישיר נכשל ב-Connection timeout
+    const senderEmail = process.env.EMAIL_FROM || process.env.GMAIL_USER;
+    if (!senderEmail) { console.log('מייל אישור לא נשלח - חסר EMAIL_FROM (כתובת השולח המאומתת ב-Brevo)'); return; }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    try {
+      const r = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: { 'api-key': process.env.BREVO_API_KEY, 'Content-Type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({ sender: { name: 'בית הבירה והיין', email: senderEmail }, to: [{ email: order.customerEmail }], subject, htmlContent: html }),
+        signal: ctrl.signal,
+      });
+      if (!r.ok) throw new Error(`Brevo ${r.status}: ${(await r.text()).slice(0, 200)}`);
+    } finally { clearTimeout(timer); }
+  } else {
+    await transport.sendMail({ from: `"בית הבירה והיין" <${process.env.GMAIL_USER}>`, to: order.customerEmail, subject, html });
+  }
+  console.log('📧 מייל אישור נשלח להזמנה', shortId, useBrevo ? '(Brevo)' : '(Gmail)');
 }
 
 // POST /create-order  body: { branch, items:[{barcode,qty}], pickupDay, pickupSlot, customerName, customerPhone, customerEmail, marketingConsent, payNow }
@@ -528,7 +542,8 @@ app.post('/notify-new-order', async (req, res) => {
       invalidKeys.forEach((k) => { cleanup[k] = null; });
       await db.ref(`adminPushTokens/${branch}`).update(cleanup);
     }
-    console.log('✅ Sent:', result.successCount, 'Failed:', result.failureCount);
+    console.log('✅ Sent:', result.successCount, 'Failed:', result.failureCount,
+      result.responses.filter((r) => !r.success).map((r) => r.error && r.error.code).join(',') || '');
 
     // עדכון כרטיס לקוח (customerProfiles) - עכשיו נעשה כאן, בצד השרת, במקום שהלקוח יכתוב ישירות ל-Firebase.
     // זה מאפשר לנעול את הנתיב הזה מכתיבה אנונימית ישירה בלי לשבור את התכונה עצמה.
@@ -1131,6 +1146,7 @@ app.post('/notify-order-status', requireApiKey, async (req, res) => {
     const entries = Object.entries(tokensData).filter(([k, t]) => t && t.token);
     const tokens = entries.map(([k, t]) => t.token);
 
+    console.log('📲 [/notify-order-status]', { branch, orderId, status: status || 'custom', customerTokens: tokens.length });
     if (!tokens.length) {
       return res.json({ ok: true, sent: 0, note: 'הלקוח לא הפעיל התראות להזמנה הזו' });
     }
@@ -1156,6 +1172,8 @@ app.post('/notify-order-status', requireApiKey, async (req, res) => {
       invalidKeys.forEach((k) => { cleanup[k] = null; });
       await db.ref(`customerPushTokens/${branch}/${orderId}`).update(cleanup);
     }
+    console.log('✅ [/notify-order-status] Sent:', result.successCount, 'Failed:', result.failureCount,
+      result.responses.filter((r) => !r.success).map((r) => r.error && r.error.code).join(',') || '');
 
     res.json({ ok: true, sent: result.successCount, failed: result.failureCount });
   } catch (err) {
