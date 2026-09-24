@@ -1157,6 +1157,12 @@ app.post('/notify-order-status', requireApiKey, async (req, res) => {
         body: customMessage || CUSTOMER_STATUS_MESSAGES[status] || 'סטטוס ההזמנה שלך התעדכן',
       },
       data: { orderId: String(orderId), branch: String(branch), type: 'order-status' },
+      // Urgency high: אנדרואיד מוסר מיד גם כשהטלפון במצב חיסכון; link: לחיצה על ההתראה פותחת את מסך ההזמנה
+      webpush: {
+        headers: { Urgency: 'high' },
+        notification: { icon: '/retail/icon-192.png', dir: 'rtl' },
+        fcmOptions: { link: `https://beit-habira.com/retail/?branch=${encodeURIComponent(branch)}&viewOrder=${encodeURIComponent(orderId)}` },
+      },
       tokens,
     };
     const result = await admin.messaging().sendEachForMulticast(message);
