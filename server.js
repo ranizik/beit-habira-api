@@ -265,7 +265,7 @@ async function sendOrderConfirmationEmail(orderId, order) {
     console.log('מייל אישור לא נשלח - BREVO_API_KEY (או GMAIL_USER/GMAIL_PASS) לא מוגדרים');
     return;
   }
-  const shortId = String(orderId).slice(-6).toUpperCase();
+  const shortId = order.orderNumber ? String(order.orderNumber) : String(orderId).slice(-6).toUpperCase();
   const rows = (order.items || []).map((it) => `
     <tr>
       <td style="padding:8px;border-bottom:1px solid #eee;">${escHtml(it.name)}</td>
@@ -387,6 +387,13 @@ app.post('/create-order', express.json(), async (req, res) => {
     const email = String(customerEmail || '').trim().toLowerCase();
     if (email && EMAIL_RE.test(email)) order.customerEmail = email;
 
+    // מספר הזמנה מספרי רץ לכל סניף (1001, 1002...) - טרנזקציה אטומית כך ששתי הזמנות במקביל לא יקבלו אותו מספר
+    try {
+      const tx = await db.ref(`orderCounters/${branch}`).transaction((cur) => (Number(cur) || 1000) + 1);
+      if (tx.committed) order.orderNumber = tx.snapshot.val();
+    } catch (e) {
+      console.error('הקצאת מספר הזמנה נכשלה (ההזמנה תישמר בלי מספר):', e.message);
+    }
     const ref = await db.ref(`pickupOrders/${branch}`).push(order);
     res.json({ ok: true, orderId: ref.key, order });
 
@@ -522,7 +529,7 @@ app.post('/notify-new-order', async (req, res) => {
     const message = {
       notification: {
         title: 'הזמנה חדשה 🔔',
-        body: `${order.customerName || 'לקוח'} · ₪${(order.totalAmount || 0).toFixed(2)} · ${(order.items || []).length} פריטים`,
+        body: `${order.orderNumber ? '#' + order.orderNumber + ' · ' : ''}${order.customerName || 'לקוח'} · ₪${(order.totalAmount || 0).toFixed(2)} · ${(order.items || []).length} פריטים`,
       },
       data: { orderId: String(orderId), branch: String(branch), type: 'new-order' },
       tokens,
