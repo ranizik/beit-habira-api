@@ -1197,13 +1197,29 @@ app.post('/notify-order-status', requireApiKey, async (req, res) => {
 
 // ================= שידור הודעה שיווקית - רק למי שהסכים במפורש (marketingPushTokens) =================
 //
-// POST /broadcast-message?branch=shfayim&api_key=...  body: { title, body }
+// POST /broadcast-message?branch=shfayim  body: { title, body, image?, link? }  (image/link = הודעת מבצע עם תמונה)
 app.post('/broadcast-message', requireApiKey, async (req, res) => {
   try {
     const branch = req.query.branch;
     if (!validateBranch(branch, res)) return;
-    const { title, body } = req.body || {};
+    const { title, body, image, link } = req.body || {};
     if (!title || !body) return res.status(400).json({ error: 'title ו-body חובה' });
+    // הודעה עם תמונה (אופציונלי): תמונה רק מ-Cloudinary שלנו, לינק רק לאפליקציה שלנו
+    if (image && !(typeof image === 'string' && image.length < 600 && /^https:\/\/res\.cloudinary\.com\//.test(image))) {
+      return res.status(400).json({ error: 'כתובת תמונה לא חוקית' });
+    }
+    if (link && !(typeof link === 'string' && link.length < 600 && link.startsWith('https://beit-habira.com/retail/'))) {
+      return res.status(400).json({ error: 'קישור לא חוקי' });
+    }
+    const pushMessage = {
+      notification: image ? { title, body, imageUrl: image } : { title, body },
+      data: { type: 'marketing', title: String(title), body: String(body), link: link || '', image: image || '' },
+      webpush: {
+        headers: { Urgency: 'high' },
+        notification: Object.assign({ icon: '/retail/icon-192.png', dir: 'rtl' }, image ? { image } : {}),
+      },
+    };
+    if (link) pushMessage.webpush.fcmOptions = { link };
 
     const snap = await db.ref(`marketingPushTokens/${branch}`).once('value');
     const data = snap.val() || {};
@@ -1227,7 +1243,7 @@ app.post('/broadcast-message', requireApiKey, async (req, res) => {
     for (let i = 0; i < tokenEntries.length; i += BATCH_SIZE) {
       const batch = tokenEntries.slice(i, i + BATCH_SIZE);
       const tokens = batch.map((e) => e[2]);
-      const result = await admin.messaging().sendEachForMulticast({ notification: { title, body }, tokens });
+      const result = await admin.messaging().sendEachForMulticast({ ...pushMessage, tokens });
       totalSent += result.successCount;
       totalFailed += result.failureCount;
       result.responses.forEach((r, idx) => {
