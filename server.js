@@ -1221,6 +1221,16 @@ app.post('/broadcast-message', requireApiKey, async (req, res) => {
     };
     if (link) pushMessage.webpush.fcmOptions = { link };
 
+    // testOnly = הודעת ניסיון: נשלחת רק למכשירי המנהל (adminPushTokens), לא ללקוחות
+    const testOnly = !!(req.body && req.body.testOnly);
+    if (testOnly) {
+      const aSnap = await db.ref(`adminPushTokens/${branch}`).once('value');
+      const aTokens = Object.values(aSnap.val() || {}).filter((t) => t && t.token).map((t) => t.token);
+      if (!aTokens.length) return res.json({ ok: true, sent: 0, note: 'אין מכשירי מנהל רשומים להתראות' });
+      const r = await admin.messaging().sendEachForMulticast({ ...pushMessage, tokens: aTokens });
+      console.log('🧪 [/broadcast-message test] Sent:', r.successCount, 'Failed:', r.failureCount);
+      return res.json({ ok: true, sent: r.successCount, failed: r.failureCount, test: true });
+    }
     const snap = await db.ref(`marketingPushTokens/${branch}`).once('value');
     const data = snap.val() || {};
     // המבנה: { phoneKey: { tokenKey: {token, consentedAt} } } - שוטחים לרשימת טוקנים
