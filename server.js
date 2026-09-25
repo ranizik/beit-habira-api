@@ -233,6 +233,7 @@ app.post('/payments/webhook', express.json(), async (req, res) => {
 // ומחשב את המחיר בעצמו - כך שאי אפשר לזייף isClubPrice/unitPrice מהדפדפן.
 function isPromoActiveServer(promo) {
   if (!promo || !promo.type) return false;
+  if (!(Number(promo.val) > 0)) return false; // מבצע בלי ערך (למשל 2 ב-0) לא נחשב - מונע הזמנה בחינם
   const now = Date.now();
   if (promo.from && new Date(promo.from).getTime() > now) return false;
   if (promo.to && new Date(promo.to).getTime() < now) return false;
