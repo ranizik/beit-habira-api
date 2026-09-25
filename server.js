@@ -324,7 +324,11 @@ app.post('/create-order', express.json(), async (req, res) => {
     const retailData = retailSnap.val() || {};
 
     // חברות מועדון אמיתית - נבדקת כאן, לא נסמכים על שום דגל שהלקוח שלח
-    const memberSnap = await db.ref(`clubMembers/${skKey(phoneDigits)}`).once('value');
+    // נרמול לפורמט של רשימת המועדון (05XXXXXXXX) - כדי שלקוח שהקליד +972 / בלי 0 עדיין יזוהה
+    let clubPhone = phoneDigits;
+    if (clubPhone.startsWith('00972')) clubPhone = clubPhone.slice(5); else if (clubPhone.startsWith('972')) clubPhone = clubPhone.slice(3);
+    if (clubPhone.length === 9 && !clubPhone.startsWith('0')) clubPhone = '0' + clubPhone;
+    const memberSnap = await db.ref(`clubMembers/${skKey(clubPhone)}`).once('value');
     const memberData = memberSnap.val();
     const isClubMember = !!(memberData && memberData.active !== false);
 
@@ -384,7 +388,7 @@ app.post('/create-order', express.json(), async (req, res) => {
       createdAt: Date.now(), createdAtISO: new Date().toISOString(),
       marketingConsent: !!marketingConsent,
     };
-    if (isClubMember) order.clubMemberPhone = phoneDigits;
+    if (isClubMember) order.clubMemberPhone = clubPhone;
     const email = String(customerEmail || '').trim().toLowerCase();
     if (email && EMAIL_RE.test(email)) order.customerEmail = email;
 
