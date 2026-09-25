@@ -311,7 +311,7 @@ async function sendOrderConfirmationEmail(orderId, order) {
 // POST /create-order  body: { branch, items:[{barcode,qty}], pickupDay, pickupSlot, customerName, customerPhone, customerEmail, marketingConsent, payNow }
 app.post('/create-order', express.json(), async (req, res) => {
   try {
-    const { branch, items, pickupDay, pickupSlot, customerName, customerPhone, customerEmail, marketingConsent, payNow } = req.body || {};
+    const { branch, items, pickupDay, pickupSlot, customerName, customerPhone, customerEmail, marketingConsent, payNow, campaignId } = req.body || {};
     if (!branch || !VALID_BRANCHES.includes(branch)) return res.status(400).json({ error: 'branch לא תקף' });
     if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'items חובה' });
     if (!pickupSlot) return res.status(400).json({ error: 'pickupSlot חובה' });
@@ -394,8 +394,16 @@ app.post('/create-order', express.json(), async (req, res) => {
     } catch (e) {
       console.error('הקצאת מספר הזמנה נכשלה (ההזמנה תישמר בלי מספר):', e.message);
     }
+    // שיוך להודעה שיווקית - אם הלקוח הגיע מלחיצה על הודעה ב-48 השעות האחרונות
+    let attributedCampaign = null;
+    if (campaignId) {
+      try { if (await getActiveCampaign(branch, campaignId)) { attributedCampaign = campaignId; order.campaignId = campaignId; } } catch (e) {}
+    }
     const ref = await db.ref(`pickupOrders/${branch}`).push(order);
     res.json({ ok: true, orderId: ref.key, order });
+    if (attributedCampaign) {
+      bumpCampaignStats(branch, attributedCampaign, { orders: 1, revenue: totalAmount }).catch((e) => console.error('campaign stats failed:', e.message));
+    }
 
     // מייל אישור - אחרי שההזמנה נשמרה ואחרי שהלקוח קיבל תשובה. כישלון מייל לא משפיע על ההזמנה.
     if (order.customerEmail) {
@@ -589,6 +597,40 @@ app.post('/notify-new-order', async (req, res) => {
 // ================= רישום הסכמה שיווקית - ציבורי (לקוח אנונימי), אבל דרך השרת לא כתיבה ישירה =================
 // טוקן ה-FCM עצמו חייב להיווצר בדפדפן (API של הדפדפן), אבל השמירה ל-Firebase עוברת כאן,
 // כדי שהלקוח לא יצטרך הרשאת כתיבה ישירה לנתיב marketingPushTokens.
+// ================= סטטיסטיקת הודעות שיווקיות (נשלח / הגיע / לחצו / הזמינו) =================
+// הנתונים נשמרים ב-promoSlides/{branch}/campaigns/{id}/stats - קריא לכולם (מספרים בלבד), כתיבה רק מהשרת.
+// הספירה אנונימית - לא נשמר מי לחץ, רק כמה.
+const CAMPAIGN_ID_RE = /^[A-Za-z0-9_-]{10,40}$/;
+async function getActiveCampaign(branch, campaignId, maxAgeDays = 14) {
+  if (!VALID_BRANCHES.includes(branch) || !CAMPAIGN_ID_RE.test(String(campaignId || ''))) return null;
+  const snap = await db.ref(`promoSlides/${branch}/campaigns/${campaignId}`).once('value');
+  const c = snap.val();
+  if (!c || c.test) return null;
+  if (!c.createdAt || Date.now() - c.createdAt > maxAgeDays * 24 * 60 * 60 * 1000) return null;
+  return c;
+}
+function bumpCampaignStats(branch, campaignId, fields) {
+  return db.ref(`promoSlides/${branch}/campaigns/${campaignId}/stats`).transaction((cur) => {
+    const st = cur || {};
+    Object.entries(fields).forEach(([k, v]) => { st[k] = Math.round(((Number(st[k]) || 0) + v) * 100) / 100; });
+    return st;
+  });
+}
+// POST /campaign-event  body: { branch, campaignId, type: 'delivered' | 'click' }  - ציבורי (נקרא מה-Service Worker ומהאפליקציה)
+app.post('/campaign-event', express.json(), async (req, res) => {
+  try {
+    const { branch, campaignId, type } = req.body || {};
+    if (!['delivered', 'click'].includes(type)) return res.status(400).json({ error: 'type לא תקף' });
+    const c = await getActiveCampaign(branch, campaignId);
+    if (!c) return res.json({ ok: false });
+    await bumpCampaignStats(branch, campaignId, { [type]: 1 });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /campaign-event error:', err.message);
+    res.status(200).json({ ok: false });
+  }
+});
+
 // POST /register-marketing-token  body: { branch, phone, deviceId, token }
 app.post('/register-marketing-token', express.json(), async (req, res) => {
   try {
@@ -1202,7 +1244,7 @@ app.post('/broadcast-message', requireApiKey, async (req, res) => {
   try {
     const branch = req.query.branch;
     if (!validateBranch(branch, res)) return;
-    const { title, body, image, link } = req.body || {};
+    const { title, body, image, link, campaignId } = req.body || {};
     if (!title || !body) return res.status(400).json({ error: 'title ו-body חובה' });
     // הודעה עם תמונה (אופציונלי): תמונה רק מ-Cloudinary שלנו, לינק רק לאפליקציה שלנו
     if (image && !(typeof image === 'string' && image.length < 600 && /^https:\/\/res\.cloudinary\.com\//.test(image))) {
@@ -1213,7 +1255,7 @@ app.post('/broadcast-message', requireApiKey, async (req, res) => {
     }
     const pushMessage = {
       notification: image ? { title, body, imageUrl: image } : { title, body },
-      data: { type: 'marketing', title: String(title), body: String(body), link: link || '', image: image || '' },
+      data: { type: 'marketing', title: String(title), body: String(body), link: link || '', image: image || '', campaignId: '', branch: String(branch) },
       webpush: {
         headers: { Urgency: 'high' },
         notification: Object.assign({ icon: '/retail/icon-192.png', dir: 'rtl' }, image ? { image } : {}),
@@ -1231,6 +1273,8 @@ app.post('/broadcast-message', requireApiKey, async (req, res) => {
       console.log('🧪 [/broadcast-message test] Sent:', r.successCount, 'Failed:', r.failureCount);
       return res.json({ ok: true, sent: r.successCount, failed: r.failureCount, test: true });
     }
+    const statsCampaign = (campaignId && await getActiveCampaign(branch, campaignId)) ? campaignId : null;
+    if (statsCampaign) pushMessage.data.campaignId = statsCampaign;
     const snap = await db.ref(`marketingPushTokens/${branch}`).once('value');
     const data = snap.val() || {};
     // המבנה: { phoneKey: { tokenKey: {token, consentedAt} } } - שוטחים לרשימת טוקנים
@@ -1269,6 +1313,9 @@ app.post('/broadcast-message', requireApiKey, async (req, res) => {
       await db.ref(`marketingPushTokens/${branch}`).update(cleanup);
     }
 
+    if (statsCampaign) {
+      await db.ref(`promoSlides/${branch}/campaigns/${statsCampaign}/stats`).update({ sent: totalSent, failed: totalFailed, sentAt: Date.now() });
+    }
     res.json({ ok: true, sent: totalSent, failed: totalFailed });
   } catch (err) {
     console.error('POST /broadcast-message error:', err.message);
