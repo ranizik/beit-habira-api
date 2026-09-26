@@ -161,6 +161,9 @@ app.post('/payments/create-link', express.json(), async (req, res) => {
       refURL_failure: `${origin}/index.html?branch=${branch}&paymentOrderId=${orderId}&paymentStatus=failure`,
       refURL_callback: `${req.protocol}://${req.headers.host}/payments/webhook`,
     };
+    // חיוב מושהה (J5): הלקוח מאשר מסגרת, והחיוב בפועל נעשה מהניהול אחרי שההזמנה מוכנה (בסכום הסופי).
+    // מופעל ע"י PAYPLUS_DEFERRED=1 ב-Render. TODO בהפעלה: לאמת מול PayPlus את הערך של charge_method ל-J5.
+    if (process.env.PAYPLUS_DEFERRED === '1') payload.charge_method = 2;
 
     const ppRes = await fetch(`${PAYPLUS_BASE}/PaymentPages/generateLink`, {
       method: 'POST',
@@ -214,16 +217,58 @@ app.post('/payments/webhook', express.json(), async (req, res) => {
       // Idempotency: הזמנה שכבר סומנה 'paid' לא נדרסת ע"י וובהוק כפול/מאוחר (למשל 'failed' שמגיע אחרי 'paid')
       const current = (await db.ref(`pickupOrders/${branch}/${orderId}/paymentStatus`).once('value')).val();
       if (current === 'paid') return res.json({ received: true, duplicate: true });
-      await db.ref(`pickupOrders/${branch}/${orderId}`).update({
-        paymentStatus: isApproved ? 'paid' : 'failed',
+      const d = body.data || body;
+      const deferred = process.env.PAYPLUS_DEFERRED === '1';
+      const upd = {
+        paymentStatus: isApproved ? (deferred ? 'authorized' : 'paid') : 'failed',
         paymentUpdatedAt: Date.now(),
         paymentRaw: body,
-      });
+      };
+      if (isApproved && deferred) {
+        upd.transactionUid = d.transaction_uid || body.transaction_uid || null;
+        upd.authorizedAmount = Number(d.amount || body.amount) || null;
+      }
+      await db.ref(`pickupOrders/${branch}/${orderId}`).update(upd);
     }
     res.json({ received: true });
   } catch (err) {
     console.error('POST /payments/webhook error:', err.message);
     res.status(200).json({ received: true }); // תמיד 200 לוובהוק, כדי שלא ינסו שוב ושוב על שגיאה אצלנו
+  }
+});
+
+// POST /payments/capture  body: { branch, orderId }  (מנהל בלבד)
+// חיוב בפועל של מסגרת שאושרה (J5) - בסכום הנוכחי של ההזמנה אחרי עריכה, ולא יותר מהמסגרת.
+app.post('/payments/capture', requireApiKey, express.json(), async (req, res) => {
+  try {
+    if (!paymentsConfigured()) return res.status(503).json({ error: 'הסליקה עדיין לא מחוברת (ממתין להגדרת PayPlus)' });
+    const { branch, orderId } = req.body || {};
+    if (!VALID_BRANCHES.includes(branch) || !orderId) return res.status(400).json({ error: 'branch ו-orderId חובה' });
+    const ref = db.ref(`pickupOrders/${branch}/${orderId}`);
+    const order = (await ref.once('value')).val();
+    if (!order) return res.status(404).json({ error: 'הזמנה לא נמצאה' });
+    if (order.paymentStatus === 'paid') return res.status(409).json({ error: 'ההזמנה כבר חויבה' });
+    if (order.paymentStatus !== 'authorized' || !order.transactionUid) return res.status(409).json({ error: 'אין להזמנה מסגרת מאושרת לחיוב' });
+    const amount = Math.round(Number(order.totalAmount || 0) * 100) / 100;
+    if (!(amount > 0)) return res.status(400).json({ error: 'סכום לא תקין' });
+    if (order.authorizedAmount && amount > Number(order.authorizedAmount)) return res.status(400).json({ error: 'הסכום גבוה מהמסגרת שאושרה' });
+    // TODO בהפעלה: לאמת מול תיעוד PayPlus את שם ה-endpoint והשדות
+    const ppRes = await fetch(`${PAYPLUS_BASE}/Transactions/ChargeByTransactionUID`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'api-key': process.env.PAYPLUS_API_KEY, 'secret-key': process.env.PAYPLUS_SECRET_KEY },
+      body: JSON.stringify({ transaction_uid: order.transactionUid, amount }),
+    });
+    const ppData = await ppRes.json().catch(() => ({}));
+    const ok = ppRes.ok && ppData && ppData.results && ppData.results.status === 'success';
+    if (!ok) {
+      console.error('PayPlus capture failed:', JSON.stringify(ppData).slice(0, 500));
+      return res.status(502).json({ error: 'החיוב נכשל מול PayPlus', details: ppData && ppData.results });
+    }
+    await ref.update({ paymentStatus: 'paid', paidAmount: amount, paidAt: Date.now(), paymentUpdatedAt: Date.now() });
+    res.json({ ok: true, amount });
+  } catch (err) {
+    console.error('POST /payments/capture error:', err.message);
+    res.status(500).json({ error: 'שגיאה בחיוב', details: err.message });
   }
 });
 
