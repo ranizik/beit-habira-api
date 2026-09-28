@@ -406,7 +406,9 @@ app.post('/create-order', express.json(), async (req, res) => {
         lineTotal = appliedPrice * qty;
       }
 
+      const mixP = (product.promo && product.promo.type === 'mix' && isPromoActiveServer(product.promo) && Number(product.promo.qty) > 1) ? product.promo : null;
       orderItems.push({
+        ...(mixP ? { _mixKey: String(mixP.group || '').trim() + '|' + mixP.qty + '|' + mixP.val, _mixQty: Number(mixP.qty), _mixVal: Number(mixP.val), mixGroup: String(mixP.group || '') } : {}),
         barcode, name: product.name, qty,
         unitPrice: appliedPrice, // שם השדה נשאר תואם למה שהקוד הקיים (מסך סטטוס, עריכת הזמנה) כבר קורא
         lineTotal,
@@ -415,6 +417,32 @@ app.post('/create-order', express.json(), async (req, res) => {
       });
     }
     if (!orderItems.length) return res.status(400).json({ error: 'אין פריטים תקפים בהזמנה' });
+
+    // מבצע מיקס: כל היחידות מאותה קבוצה נספרות ביחד (למשל 5 ב-60 על בירות שונות).
+    // היחידות היקרות נכנסות קודם לחבילות, וההנחה מתחלקת יחסית בין השורות. זהה לחישוב בסל באפליקציה.
+    const mixGroups = {};
+    orderItems.forEach((it, idx) => {
+      if (!it._mixKey) return;
+      const g = (mixGroups[it._mixKey] = mixGroups[it._mixKey] || { qty: it._mixQty, val: it._mixVal, units: [] });
+      for (let i = 0; i < it.qty; i++) g.units.push({ idx, unit: it.appliedPrice });
+    });
+    Object.values(mixGroups).forEach((g) => {
+      const n = Math.floor(g.units.length / g.qty);
+      if (!n) return;
+      g.units.sort((a, b) => b.unit - a.unit);
+      const chosen = g.units.slice(0, n * g.qty);
+      const sum = chosen.reduce((a, u) => a + u.unit, 0);
+      const d = sum - n * g.val;
+      if (!(d > 0)) return;
+      const gd = {};
+      chosen.forEach((u) => { gd[u.idx] = (gd[u.idx] || 0) + d * (u.unit / sum); });
+      // עיגול לאגורות בלי לאבד אגורה - ההפרש נזקף לשורה הראשונה, כך שסך החבילה יוצא בדיוק
+      const ks = Object.keys(gd); let acc = 0;
+      ks.forEach((k) => { gd[k] = Math.round(gd[k] * 100) / 100; acc += gd[k]; });
+      gd[ks[0]] = Math.round((gd[ks[0]] + (Math.round(d * 100) / 100 - acc)) * 100) / 100;
+      ks.forEach((k) => { orderItems[k].lineTotal -= gd[k]; orderItems[k].mixApplied = true; });
+    });
+    orderItems.forEach((it) => { delete it._mixKey; delete it._mixQty; delete it._mixVal; });
 
     const totalItems = orderItems.reduce((s, it) => s + it.qty, 0);
     // עיגול לאגורות - אחרת הנחת אחוזים יוצרת סכומים כמו 89.99999 (מגיעים גם לסליקה ולמייל)
