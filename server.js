@@ -397,18 +397,13 @@ app.post('/create-order', express.json(), async (req, res) => {
       const useClubPrice = !!(isClubMember && clubPrice && clubPrice < priceAfterPromo);
       const appliedPrice = useClubPrice ? clubPrice : priceAfterPromo;
 
-      let lineTotal;
-      if (product.promo && product.promo.type === 'bundle' && isPromoActiveServer(product.promo) && product.promo.qty > 0) {
-        const groups = Math.floor(qty / product.promo.qty);
-        const remainder = qty % product.promo.qty;
-        lineTotal = groups * product.promo.val + remainder * regularPrice;
-      } else {
-        lineTotal = appliedPrice * qty;
-      }
+      let lineTotal = appliedPrice * qty;
 
-      const mixP = (product.promo && product.promo.type === 'mix' && isPromoActiveServer(product.promo) && Number(product.promo.qty) > 1) ? product.promo : null;
+      // מבצעי כמות: כל המוצרים עם אותו מבצע (אותה כמות ואותו מחיר) נספרים ביחד, גם אם הם מוצרים שונים
+      const mixP = (product.promo && (product.promo.type === 'mix' || product.promo.type === 'bundle') && isPromoActiveServer(product.promo) && Number(product.promo.qty) > 1) ? product.promo : null;
+      if (mixP) lineTotal = regularPrice * qty;
       orderItems.push({
-        ...(mixP ? { _mixKey: String(mixP.group || '').trim() + '|' + mixP.qty + '|' + mixP.val, _mixQty: Number(mixP.qty), _mixVal: Number(mixP.val), mixGroup: String(mixP.group || '') } : {}),
+        ...(mixP ? { _mixKey: (mixP.type === 'bundle' ? 'q' : String(mixP.group || '').trim()) + '|' + mixP.qty + '|' + mixP.val, _mixQty: Number(mixP.qty), _mixVal: Number(mixP.val), _mixUnit: regularPrice, ...(mixP.type === 'mix' ? { mixGroup: String(mixP.group || '') } : {}) } : {}),
         barcode, name: product.name, qty,
         unitPrice: appliedPrice, // שם השדה נשאר תואם למה שהקוד הקיים (מסך סטטוס, עריכת הזמנה) כבר קורא
         lineTotal,
@@ -424,7 +419,7 @@ app.post('/create-order', express.json(), async (req, res) => {
     orderItems.forEach((it, idx) => {
       if (!it._mixKey) return;
       const g = (mixGroups[it._mixKey] = mixGroups[it._mixKey] || { qty: it._mixQty, val: it._mixVal, units: [] });
-      for (let i = 0; i < it.qty; i++) g.units.push({ idx, unit: it.appliedPrice });
+      for (let i = 0; i < it.qty; i++) g.units.push({ idx, unit: it._mixUnit });
     });
     Object.values(mixGroups).forEach((g) => {
       const n = Math.floor(g.units.length / g.qty);
@@ -442,7 +437,7 @@ app.post('/create-order', express.json(), async (req, res) => {
       gd[ks[0]] = Math.round((gd[ks[0]] + (Math.round(d * 100) / 100 - acc)) * 100) / 100;
       ks.forEach((k) => { orderItems[k].lineTotal -= gd[k]; orderItems[k].mixApplied = true; });
     });
-    orderItems.forEach((it) => { delete it._mixKey; delete it._mixQty; delete it._mixVal; });
+    orderItems.forEach((it) => { delete it._mixKey; delete it._mixQty; delete it._mixVal; delete it._mixUnit; });
 
     const totalItems = orderItems.reduce((s, it) => s + it.qty, 0);
     // עיגול לאגורות - אחרת הנחת אחוזים יוצרת סכומים כמו 89.99999 (מגיעים גם לסליקה ולמייל)
