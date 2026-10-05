@@ -282,7 +282,17 @@ function isPromoActiveServer(promo) {
   const now = Date.now();
   if (promo.from && new Date(promo.from).getTime() > now) return false;
   if (promo.to && new Date(promo.to).getTime() < now) return false;
+  // ימים בשבוע כמו במנוע: "123456" = ראשון עד שישי (1=ראשון ... 7=שבת), לפי שעון ישראל
+  if (promo.days) {
+    const wd = { Sun: 1, Mon: 2, Tue: 3, Wed: 4, Thu: 5, Fri: 6, Sat: 7 }[new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem', weekday: 'short' })];
+    if (wd && !String(promo.days).includes(String(wd))) return false;
+  }
   return true;
+}
+// מבצע מועדון (clubPromo) גובר על המבצע הרגיל רק כשהלקוח חבר מועדון מאומת ומבצע המועדון פעיל
+function effectivePromo(product, isClubMember) {
+  if (isClubMember && product && isPromoActiveServer(product.clubPromo)) return product.clubPromo;
+  return product ? product.promo : null;
 }
 // ================= מייל אישור הזמנה (Gmail SMTP) =================
 // משתני סביבה ב-Render: GMAIL_USER (כתובת), GMAIL_PASS (סיסמת אפליקציה בת 16 תווים מ-Google).
@@ -389,9 +399,10 @@ app.post('/create-order', express.json(), async (req, res) => {
       }
       const regularPrice = product.price || 0;
       let priceAfterPromo = regularPrice;
-      if (isPromoActiveServer(product.promo)) {
-        if (product.promo.type === 'pct') priceAfterPromo = priceAfterPromo * (1 - (product.promo.val || 0) / 100);
-        else if (product.promo.type === 'fixed') priceAfterPromo = product.promo.val || priceAfterPromo;
+      const promo = effectivePromo(product, isClubMember);
+      if (isPromoActiveServer(promo)) {
+        if (promo.type === 'pct') priceAfterPromo = priceAfterPromo * (1 - (promo.val || 0) / 100);
+        else if (promo.type === 'fixed') priceAfterPromo = promo.val || priceAfterPromo;
       }
       const clubPrice = product.clubPrice > 0 ? product.clubPrice : null;
       const useClubPrice = !!(isClubMember && clubPrice && clubPrice < priceAfterPromo);
@@ -400,7 +411,7 @@ app.post('/create-order', express.json(), async (req, res) => {
       let lineTotal = appliedPrice * qty;
 
       // מבצעי כמות: כל המוצרים עם אותו מבצע (אותה כמות ואותו מחיר) נספרים ביחד, גם אם הם מוצרים שונים
-      const mixP = (product.promo && (product.promo.type === 'mix' || product.promo.type === 'bundle') && isPromoActiveServer(product.promo) && Number(product.promo.qty) > 1) ? product.promo : null;
+      const mixP = (promo && (promo.type === 'mix' || promo.type === 'bundle') && isPromoActiveServer(promo) && Number(promo.qty) > 1) ? promo : null;
       if (mixP) lineTotal = regularPrice * qty;
       orderItems.push({
         ...(mixP ? { _mixKey: (mixP.type === 'bundle' ? 'q' : String(mixP.group || '').trim()) + '|' + mixP.qty + '|' + mixP.val, _mixQty: Number(mixP.qty), _mixVal: Number(mixP.val), _mixUnit: regularPrice, ...(mixP.type === 'mix' ? { mixGroup: String(mixP.group || '') } : {}) } : {}),
