@@ -290,9 +290,15 @@ function isPromoActiveServer(promo) {
   return true;
 }
 // מבצע מועדון (clubPromo) גובר על המבצע הרגיל רק כשהלקוח חבר מועדון מאומת ומבצע המועדון פעיל
+// הנחת מועדון באחוזים (למשל 5% ליינות) לא גוברת על מבצע רגיל פעיל - בדיוק כמו באפליקציה
 function effectivePromo(product, isClubMember) {
-  if (isClubMember && product && isPromoActiveServer(product.clubPromo)) return product.clubPromo;
-  return product ? product.promo : null;
+  if (!product) return null;
+  const cp = product.clubPromo;
+  if (isClubMember && isPromoActiveServer(cp)) {
+    if (cp.type === 'pct' && isPromoActiveServer(product.promo)) return product.promo;
+    return cp;
+  }
+  return product.promo;
 }
 // ================= מייל אישור הזמנה (Gmail SMTP) =================
 // משתני סביבה ב-Render: GMAIL_USER (כתובת), GMAIL_PASS (סיסמת אפליקציה בת 16 תווים מ-Google).
