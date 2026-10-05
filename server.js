@@ -410,6 +410,12 @@ app.post('/create-order', express.json(), async (req, res) => {
         if (promo.type === 'pct') priceAfterPromo = priceAfterPromo * (1 - (promo.val || 0) / 100);
         else if (promo.type === 'fixed') priceAfterPromo = promo.val || priceAfterPromo;
       }
+      // הנחת מועדון באחוזים (למשל 5% ליינות) כשיש גם מבצע רגיל: במבצע מחיר/אחוז - הזול מביניהם; במבצע כמות - על היחידות שלא נכנסו לחבילה (מחושב בהמשך)
+      const cpr = product.clubPromo;
+      const clubPct = (isClubMember && cpr && cpr.type === 'pct' && isPromoActiveServer(cpr) && promo !== cpr) ? (Number(cpr.val) || 0) : 0;
+      if (clubPct && isPromoActiveServer(promo) && (promo.type === 'fixed' || promo.type === 'pct')) {
+        priceAfterPromo = Math.min(priceAfterPromo, regularPrice * (1 - clubPct / 100));
+      }
       const clubPrice = product.clubPrice > 0 ? product.clubPrice : null;
       const useClubPrice = !!(isClubMember && clubPrice && clubPrice < priceAfterPromo);
       const appliedPrice = useClubPrice ? clubPrice : priceAfterPromo;
@@ -420,6 +426,7 @@ app.post('/create-order', express.json(), async (req, res) => {
       const mixP = (promo && (promo.type === 'mix' || promo.type === 'bundle') && isPromoActiveServer(promo) && Number(promo.qty) > 1) ? promo : null;
       if (mixP) lineTotal = regularPrice * qty;
       orderItems.push({
+        ...(mixP && clubPct ? { _clubPct: clubPct, _used: 0 } : {}),
         ...(mixP ? { _mixKey: (mixP.type === 'bundle' ? 'q' : String(mixP.group || '').trim()) + '|' + mixP.qty + '|' + mixP.val, _mixQty: Number(mixP.qty), _mixVal: Number(mixP.val), _mixUnit: regularPrice, ...(mixP.type === 'mix' ? { mixGroup: String(mixP.group || '') } : {}) } : {}),
         barcode, name: product.name, qty,
         unitPrice: appliedPrice, // שם השדה נשאר תואם למה שהקוד הקיים (מסך סטטוס, עריכת הזמנה) כבר קורא
@@ -443,6 +450,7 @@ app.post('/create-order', express.json(), async (req, res) => {
       if (!n) return;
       g.units.sort((a, b) => b.unit - a.unit);
       const chosen = g.units.slice(0, n * g.qty);
+      chosen.forEach((u) => { if (orderItems[u.idx]._clubPct) orderItems[u.idx]._used += 1; });
       const sum = chosen.reduce((a, u) => a + u.unit, 0);
       const d = sum - n * g.val;
       if (!(d > 0)) return;
@@ -454,7 +462,13 @@ app.post('/create-order', express.json(), async (req, res) => {
       gd[ks[0]] = Math.round((gd[ks[0]] + (Math.round(d * 100) / 100 - acc)) * 100) / 100;
       ks.forEach((k) => { orderItems[k].lineTotal -= gd[k]; orderItems[k].mixApplied = true; });
     });
-    orderItems.forEach((it) => { delete it._mixKey; delete it._mixQty; delete it._mixVal; delete it._mixUnit; });
+    // יחידות ממבצע כמות שלא השלימו חבילה - מקבלות את הנחת המועדון באחוזים
+    orderItems.forEach((it) => {
+      if (!it._clubPct) return;
+      const left = Math.max(0, it.qty - (it._used || 0));
+      if (left) { const d = left * it.regularPrice * it._clubPct / 100; it.lineTotal -= d; it.clubPctDiscount = Math.round(d * 100) / 100; }
+    });
+    orderItems.forEach((it) => { delete it._mixKey; delete it._mixQty; delete it._mixVal; delete it._mixUnit; delete it._clubPct; delete it._used; });
 
     const totalItems = orderItems.reduce((s, it) => s + it.qty, 0);
     // עיגול לאגורות - אחרת הנחת אחוזים יוצרת סכומים כמו 89.99999 (מגיעים גם לסליקה ולמייל)
