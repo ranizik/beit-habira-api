@@ -769,6 +769,113 @@ app.post('/register-order-token', express.json(), async (req, res) => {
   }
 });
 
+// ======================================================================
+// אימות צוות (מערכת ספקים /orders + מערכת משימות /tasks) — הצעה, לא פורסם
+// השרת מאמת קוד מנהל / סיסמת עובד מול Firebase (Admin SDK) ומחזיר Custom Token
+// עם הרשאות (claims). פרטי ההתחברות לא נמצאים בקוד צד לקוח ולא קריאים ללקוח.
+// ======================================================================
+const staffLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10, // 10 ניסיונות ל-15 דקות לכל IP — מונע ניחוש של קוד בן 4 ספרות
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'יותר מדי ניסיונות התחברות. נסה שוב בעוד 15 דקות.' },
+});
+const staffPinLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false, message: { error: 'יותר מדי ניסיונות. נסה שוב בעוד 15 דקות.' } });
+const SAFE_ID = /^[-_A-Za-z0-9]{1,40}$/;
+
+// רשימת שמות עובדים פעילים למסך ההתחברות — רק id + name (בלי סיסמאות/תפקידים)
+app.get('/staff/workers', async (req, res) => {
+  try {
+    const branch = String(req.query.branch || '');
+    if (!VALID_BRANCHES.includes(branch)) return res.status(400).json({ error: 'branch לא תקף' });
+    const v = (await db.ref(`workers/${branch}`).once('value')).val() || {};
+    const list = Object.entries(v)
+      .filter(([, w]) => w && w.active !== false)
+      .map(([id, w]) => ({ id, name: String(w.name || '') }));
+    res.json({ ok: true, workers: list });
+  } catch (err) {
+    console.error('GET /staff/workers error:', err.message);
+    res.status(500).json({ error: 'שגיאת שרת' });
+  }
+});
+
+// POST /staff/login  body: { app:'orders'|'tasks', branch, role:'manager'|'worker', workerId, secret }
+app.post('/staff/login', staffLoginLimiter, express.json(), async (req, res) => {
+  try {
+    const { app: staffApp, branch, role, workerId, secret } = req.body || {};
+    if (!['orders', 'tasks'].includes(staffApp)) return res.status(400).json({ error: 'app לא תקף' });
+    if (!secret) return res.status(400).json({ error: 'חסר קוד/סיסמה' });
+
+    let uid, claims, name = '';
+    if (staffApp === 'tasks' || role === 'manager') {
+      const pin = (await db.ref('config/managerPin').once('value')).val();
+      if (!pin) return res.status(503).json({ error: 'קוד מנהל לא מוגדר' }); // אין יותר ברירת מחדל 1234
+      if (!safeEqual(String(secret), String(pin))) return res.status(401).json({ error: 'קוד שגוי' });
+      if (staffApp === 'tasks') { uid = 'staff-tasks'; claims = { staff: 'tasks', staffRole: 'owner' }; }
+      else { uid = 'staff-owner'; claims = { staff: 'orders', staffRole: 'owner' }; }
+    } else {
+      if (!VALID_BRANCHES.includes(branch) || !SAFE_ID.test(String(workerId || ''))) return res.status(400).json({ error: 'פרטים לא תקפים' });
+      const w = (await db.ref(`workers/${branch}/${workerId}`).once('value')).val();
+      if (!w || w.active === false) return res.status(401).json({ error: 'המשתמש הזה לא פעיל' });
+      if (!w.password || !safeEqual(String(secret), String(w.password))) return res.status(401).json({ error: 'סיסמה שגויה' });
+      uid = `staff-${branch}-${workerId}`;
+      claims = { staff: 'orders', staffRole: w.role === 'store_manager' ? 'store_manager' : 'worker', branch, wid: workerId };
+      name = String(w.name || '');
+      db.ref(`workers/${branch}/${workerId}/lastLogin`).set(new Date().toISOString()).catch(() => {});
+    }
+    const token = await admin.auth().createCustomToken(uid, claims);
+    res.json({ ok: true, token, staffRole: claims.staffRole, name });
+  } catch (err) {
+    console.error('POST /staff/login error:', err.message);
+    res.status(500).json({ error: 'שגיאת שרת' });
+  }
+});
+
+// POST /staff/change-pin  (Authorization: Bearer <idToken של בעל העסק>)  body: { current, next }
+app.post('/staff/change-pin', staffPinLimiter, express.json(), async (req, res) => {
+  try {
+    const h = req.headers.authorization || '';
+    const decoded = h.startsWith('Bearer ') ? await admin.auth().verifyIdToken(h.slice(7)).catch(() => null) : null;
+    if (!decoded || decoded.staff !== 'orders' || decoded.staffRole !== 'owner') return res.status(401).json({ error: 'אין הרשאה' });
+    const { current, next } = req.body || {};
+    const pin = (await db.ref('config/managerPin').once('value')).val();
+    if (!pin || !safeEqual(String(current || ''), String(pin))) return res.status(401).json({ error: 'קוד נוכחי שגוי' });
+    if (!/^\d{4,12}$/.test(String(next || ''))) return res.status(400).json({ error: 'קוד חייב להיות 4–12 ספרות' });
+    await db.ref('config/managerPin').set(String(next));
+    // מנתק סשנים קיימים של בעל העסק ושל מערכת המשימות (נכנס לתוקף תוך שעה לכל היותר)
+    await Promise.all(['staff-owner', 'staff-tasks'].map((u) => admin.auth().revokeRefreshTokens(u).catch(() => {})));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /staff/change-pin error:', err.message);
+    res.status(500).json({ error: 'שגיאת שרת' });
+  }
+});
+
+// ---- אפשרות B בלבד: סטטוס הזמנה דרך השרת (בלי שם/טלפון/אימייל) ----
+// GET /order-status?branch=..&orderId=..
+app.get('/order-status', async (req, res) => {
+  try {
+    const branch = String(req.query.branch || ''), orderId = String(req.query.orderId || '');
+    if (!VALID_BRANCHES.includes(branch) || !/^[-_A-Za-z0-9]{15,30}$/.test(orderId)) return res.status(400).json({ error: 'פרטים לא תקפים' });
+    const o = (await db.ref(`pickupOrders/${branch}/${orderId}`).once('value')).val();
+    if (!o) return res.status(404).json({ ok: false, error: 'not_found' });
+    const pick = (it) => ({ name: it.name, qty: it.qty, replacedFrom: it.replacedFrom || null, replacedBy: it.replacedBy || null });
+    res.set('Cache-Control', 'no-store');
+    res.json({ ok: true, order: {
+      branch: o.branch || branch, status: o.status || 'new', paymentStatus: o.paymentStatus || null,
+      orderNumber: o.orderNumber || null, pickupDay: o.pickupDay || null, pickupSlot: o.pickupSlot || null,
+      totalAmount: o.totalAmount, totalItems: o.totalItems, marketingConsent: !!o.marketingConsent,
+      items: (o.items || []).map(pick), removedItems: (o.removedItems || []).map(pick),
+      adminNote: o.adminNote || null, adminNoteAt: o.adminNoteAt || null, cancelReason: o.cancelReason || null,
+      missingProduct: o.missingProduct || null, missingProductName: o.missingProductName || null,
+    } });
+  } catch (err) {
+    console.error('GET /order-status error:', err.message);
+    res.status(500).json({ error: 'שגיאת שרת' });
+  }
+});
+
 // ---------- Middleware אימות לכל שאר הנתיבים ----------
 app.use(requireApiKey);
 
