@@ -392,6 +392,18 @@ app.post('/create-order', express.json(), async (req, res) => {
     const memberSnap = await db.ref(`clubMembers/${skKey(clubPhone)}`).once('value');
     const memberData = memberSnap.val();
     const isClubMember = !!(memberData && memberData.active !== false);
+    // הנחת מועדון לפי קטגוריה (למשל יינות 5%, גבינות 10%) - זהה לחישוב באפליקציה (finalPriceOf).
+    // חלה רק כשאין מבצע פעיל על המוצר ("בלי כפל מבצעים"), ולוקחים את הזול מבינה לבין מחיר מועדון ידני.
+    let clubCatDiscounts = {}, catParents = {};
+    if (isClubMember) {
+      const [ccdSnap, hierSnap] = await Promise.all([
+        db.ref(`clubCategoryDiscounts/${branch}`).once('value'),
+        db.ref(`retailCategoryHierarchy/${branch}`).once('value'),
+      ]);
+      clubCatDiscounts = ccdSnap.val() || {};
+      catParents = hierSnap.val() || {};
+    }
+    const topCatOf = (cat) => { let cur = cat; const seen = new Set(); while (catParents[skKey(cur)] && !seen.has(cur)) { seen.add(cur); cur = catParents[skKey(cur)]; } return cur; };
 
     const orderItems = [];
     for (const reqItem of items) {
@@ -417,8 +429,16 @@ app.post('/create-order', express.json(), async (req, res) => {
         priceAfterPromo = Math.min(priceAfterPromo, regularPrice * (1 - clubPct / 100));
       }
       const clubPrice = product.clubPrice > 0 ? product.clubPrice : null;
-      const useClubPrice = !!(isClubMember && clubPrice && clubPrice < priceAfterPromo);
-      const appliedPrice = useClubPrice ? clubPrice : priceAfterPromo;
+      let useClubPrice = !!(isClubMember && clubPrice && clubPrice < priceAfterPromo);
+      let appliedPrice = useClubPrice ? clubPrice : priceAfterPromo;
+      if (isClubMember && !isPromoActiveServer(promo) && product.category && !product.noClubDiscount) {
+        const cat = product.category, top = topCatOf(cat);
+        const pct = Number(clubCatDiscounts[cat] ?? clubCatDiscounts[top] ?? 0) || 0;
+        if (pct > 0) {
+          const catPrice = regularPrice * (1 - pct / 100);
+          if (catPrice < appliedPrice) { appliedPrice = catPrice; useClubPrice = true; }
+        }
+      }
 
       let lineTotal = appliedPrice * qty;
 
