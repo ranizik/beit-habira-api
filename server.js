@@ -331,7 +331,7 @@ async function sendOrderConfirmationEmail(orderId, order) {
   const rows = (order.items || []).map((it) => `
     <tr>
       <td style="padding:8px;border-bottom:1px solid #eee;">${escHtml(it.name)}</td>
-      <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">${it.qty}</td>
+      <td style="padding:8px;border-bottom:1px solid #eee;text-align:center;">${it.weighed ? (it.actualWeightGr || (it.qty || 0) * 100) + ' גרם' + (it.actualWeightGr ? '' : ' (משוער)') : it.qty}</td>
       <td style="padding:8px;border-bottom:1px solid #eee;text-align:left;">₪${Number(it.lineTotal || 0).toFixed(2)}</td>
     </tr>`).join('');
   const html = `<!DOCTYPE html><html dir="rtl" lang="he"><body style="margin:0;background:#f5f3ef;font-family:Arial,sans-serif;direction:rtl;">
@@ -417,7 +417,10 @@ app.post('/create-order', express.json(), async (req, res) => {
       }
       const regularPrice = product.price || 0;
       let priceAfterPromo = regularPrice;
-      const promo = effectivePromo(product, isClubMember);
+      // מוצר שקיל: המחיר במוצר הוא לק"ג, ו-qty הוא מספר יחידות של 100 גרם. מבצעי כמות לא חלים על מוצרים שקילים.
+      const isWeighed = !!product.weighed && !!(req.body && req.body.weighedV); // weighedV - רק אפליקציה מעודכנת שמכירה מוצרים שקילים (גרסה ישנה ממשיכה לעבוד כרגיל)
+      let promo = effectivePromo(product, isClubMember);
+      if (isWeighed && promo && (promo.type === 'mix' || promo.type === 'bundle')) promo = null;
       if (isPromoActiveServer(promo)) {
         if (promo.type === 'pct') priceAfterPromo = priceAfterPromo * (1 - (promo.val || 0) / 100);
         else if (promo.type === 'fixed') priceAfterPromo = promo.val || priceAfterPromo;
@@ -440,15 +443,16 @@ app.post('/create-order', express.json(), async (req, res) => {
         }
       }
 
-      let lineTotal = appliedPrice * qty;
+      let lineTotal = appliedPrice * qty * (isWeighed ? 0.1 : 1);
 
       // מבצעי כמות: כל המוצרים עם אותו מבצע (אותה כמות ואותו מחיר) נספרים ביחד, גם אם הם מוצרים שונים
-      const mixP = (promo && (promo.type === 'mix' || promo.type === 'bundle') && isPromoActiveServer(promo) && Number(promo.qty) > 1) ? promo : null;
+      const mixP = (!isWeighed && promo && (promo.type === 'mix' || promo.type === 'bundle') && isPromoActiveServer(promo) && Number(promo.qty) > 1) ? promo : null;
       if (mixP) lineTotal = regularPrice * qty;
       orderItems.push({
         ...(mixP && clubPct ? { _clubPct: clubPct, _used: 0 } : {}),
         ...(mixP ? { _mixKey: (mixP.type === 'bundle' ? 'q' : String(mixP.group || '').trim()) + '|' + mixP.qty + '|' + mixP.val, _mixQty: Number(mixP.qty), _mixVal: Number(mixP.val), _mixUnit: regularPrice, ...(mixP.type === 'mix' ? { mixGroup: String(mixP.group || '') } : {}) } : {}),
         barcode, name: product.name, qty,
+        ...(isWeighed ? { weighed: true, estWeightGr: qty * 100 } : {}),
         unitPrice: appliedPrice, // שם השדה נשאר תואם למה שהקוד הקיים (מסך סטטוס, עריכת הזמנה) כבר קורא
         lineTotal,
         regularPrice, clubPrice: clubPrice || null,
@@ -490,7 +494,7 @@ app.post('/create-order', express.json(), async (req, res) => {
     });
     orderItems.forEach((it) => { delete it._mixKey; delete it._mixQty; delete it._mixVal; delete it._mixUnit; delete it._clubPct; delete it._used; });
 
-    const totalItems = orderItems.reduce((s, it) => s + it.qty, 0);
+    const totalItems = orderItems.reduce((s, it) => s + (it.weighed ? 1 : it.qty), 0);
     // עיגול לאגורות - אחרת הנחת אחוזים יוצרת סכומים כמו 89.99999 (מגיעים גם לסליקה ולמייל)
     orderItems.forEach((it) => {
       it.unitPrice = Math.round(it.unitPrice * 100) / 100;
@@ -701,7 +705,7 @@ app.post('/notify-new-order', async (req, res) => {
         (order.items || []).forEach((item) => {
           const product = retailData[item.barcode];
           const category = product && product.category;
-          if (category) updates[`categoryCounts/${skKey(category)}`] = admin.database.ServerValue.increment(item.qty || 1);
+          if (category) updates[`categoryCounts/${skKey(category)}`] = admin.database.ServerValue.increment(item.weighed ? 1 : (item.qty || 1));
         });
         await db.ref(`customerProfiles/${branch}/${phoneKey}`).update(updates);
       }
@@ -880,7 +884,7 @@ app.get('/order-status', async (req, res) => {
     if (!VALID_BRANCHES.includes(branch) || !/^[-_A-Za-z0-9]{15,30}$/.test(orderId)) return res.status(400).json({ error: 'פרטים לא תקפים' });
     const o = (await db.ref(`pickupOrders/${branch}/${orderId}`).once('value')).val();
     if (!o) return res.status(404).json({ ok: false, error: 'not_found' });
-    const pick = (it) => ({ name: it.name, qty: it.qty, replacedFrom: it.replacedFrom || null, replacedBy: it.replacedBy || null });
+    const pick = (it) => ({ name: it.name, qty: it.qty, replacedFrom: it.replacedFrom || null, replacedBy: it.replacedBy || null, ...(it.weighed ? { weighed: true, actualWeightGr: it.actualWeightGr || null } : {}) });
     res.set('Cache-Control', 'no-store');
     res.json({ ok: true, order: {
       branch: o.branch || branch, status: o.status || 'new', paymentStatus: o.paymentStatus || null,
