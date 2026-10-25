@@ -79,6 +79,10 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
+// מונה שגיאות שרת יומי לאנליטיקה (רק ספירה, בלי פרטים)
+const analytics = require('./analytics');
+app.use(analytics.serverErrorCounter(db));
+
 // אימות API Key - מתקבל גם כ-header וגם כפרמטר בכתובת (?api_key=...) לצורך תאימות
 // עם מערכות שלא תומכות בשליחת headers מותאמים (כמו קישור ישיר להורדת קובץ).
 //
@@ -899,6 +903,9 @@ app.get('/order-status', async (req, res) => {
     res.status(500).json({ error: 'שגיאת שרת' });
   }
 });
+
+// ---------- אנליטיקה: איסוף אירועים (ציבורי, מוגבל) + סיכום למנהל (מוגן) ----------
+analytics.registerAnalytics(app, { db, requireApiKey, VALID_BRANCHES });
 
 // ---------- Middleware אימות לכל שאר הנתיבים ----------
 app.use(requireApiKey);
