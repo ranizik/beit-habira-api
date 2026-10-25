@@ -111,9 +111,12 @@ async function loadEvents(db, branch, days) {
   const all = [];
   await Promise.all(days.map(async (d) => {
     const v = (await db.ref(`analytics/${branch}/ev/${d}`).once('value')).val() || {};
-    Object.values(v).forEach((e) => { if (e && !e.adm) all.push(e); });
+    Object.values(v).forEach((e) => { if (e) all.push(e); });
   }));
-  return all;
+  // ביקור שבו המנהל היה מחובר (גם אם רק חלק מהאירועים סומנו - ההתחברות נטענת אחרי תחילת הביקור) לא נספר בכלל
+  const admSessions = new Set(all.filter((e) => e.adm).map((e) => e.s));
+  const admVisitors = new Set(all.filter((e) => e.adm).map((e) => e.v));
+  return all.filter((e) => !admSessions.has(e.s) && !admVisitors.has(e.v));
 }
 
 function computeTraffic(evs) {
