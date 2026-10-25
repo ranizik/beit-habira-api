@@ -187,7 +187,7 @@ function computeFunnel(sessions, validOrderIds, now) {
     steps,
     rates: { pv: rate(steps.pv, steps.visit), add: rate(steps.add, steps.pv), cv: rate(steps.cv, steps.add), ck: rate(steps.ck, steps.cv), oa: rate(steps.oa, steps.ck), os: rate(steps.os, steps.oa), overall: rate(steps.os, steps.visit) },
     cartAbandonRate: rate(ab.count, ab.count + steps.os),
-    checkoutAbandonRate: rate(steps.ck - steps.os - 0, steps.ck),
+    checkoutAbandonRate: rate(ab.stage.checkout + ab.stage.attempt, ab.stage.checkout + ab.stage.attempt + steps.os), // רק סלים שנחשבים נטושים (לא פעילים)
     abandoned: ab, abandonWindowMin: ABANDON_MIN, failReasons: top(failReasons, 10), unconfirmedClientSuccess: unconfirmed,
   };
 }
