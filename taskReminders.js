@@ -24,11 +24,74 @@ function ilTime(dateStr, timeStr) {
 }
 
 function register(app, admin, db, express) {
+  async function authUser(req) {
+    const h = req.headers.authorization || '';
+    const decoded = h.startsWith('Bearer ') ? await admin.auth().verifyIdToken(h.slice(7)).catch(() => null) : null;
+    return decoded && SAFE.test(decoded.uid) ? decoded : null;
+  }
+  const displayName = (d) => String(d.uid === 'staff-tasks' ? 'רני' : (d.name || (d.email || '').split('@')[0] || 'משתמש')).slice(0, 40);
+  const randomCode = () => require('crypto').randomBytes(9).toString('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, 10);
+
+  // ---------- רשימות משותפות: יצירה / הצטרפות בקישור / יציאה ----------
+  // todo/shared/<listId> = { name, owner, invite, created, members: { uid: { name, at } }, tasks: {...} }
+  // todo/userLists/<uid>/<listId> = true  (אינדקס - אילו רשימות משותפות יש למשתמש)
+  // הכתיבה ל-members/invite נעשית רק כאן (בשרת), כך שאי אפשר להצטרף לרשימה בלי קישור הזמנה תקף
+  app.post('/tasks/lists/create', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      const name = String((req.body || {}).name || '').trim().slice(0, 40);
+      if (!name) return res.status(400).json({ error: 'חסר שם לרשימה' });
+      const count = Object.keys((await db.ref(`todo/userLists/${d.uid}`).once('value')).val() || {}).length;
+      if (count >= 30) return res.status(400).json({ error: 'יותר מדי רשימות' });
+      const ref = db.ref('todo/shared').push();
+      const invite = randomCode();
+      await ref.set({ name, owner: d.uid, invite, created: Date.now(), members: { [d.uid]: { name: displayName(d), at: Date.now() } } });
+      await db.ref(`todo/userLists/${d.uid}/${ref.key}`).set(true);
+      res.json({ ok: true, listId: ref.key, invite });
+    } catch (err) {
+      console.error('POST /tasks/lists/create error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
+  app.post('/tasks/lists/join', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      const { listId, invite } = req.body || {};
+      if (!SAFE.test(String(listId || '')) || !invite) return res.status(400).json({ error: 'קישור לא תקין' });
+      const list = (await db.ref(`todo/shared/${listId}`).once('value')).val();
+      if (!list || !list.invite || String(invite) !== String(list.invite)) return res.status(404).json({ error: 'הקישור לא תקף או שהרשימה נמחקה' });
+      await db.ref(`todo/shared/${listId}/members/${d.uid}`).set({ name: displayName(d), at: Date.now() });
+      await db.ref(`todo/userLists/${d.uid}/${listId}`).set(true);
+      res.json({ ok: true, listId, name: list.name });
+    } catch (err) {
+      console.error('POST /tasks/lists/join error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
+  app.post('/tasks/lists/leave', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      const { listId } = req.body || {};
+      if (!SAFE.test(String(listId || ''))) return res.status(400).json({ error: 'רשימה לא תקינה' });
+      await db.ref(`todo/shared/${listId}/members/${d.uid}`).remove();
+      await db.ref(`todo/userLists/${d.uid}/${listId}`).remove();
+      // הרשימה עצמה לא נמחקת לעולם (גם כשכולם יצאו) - כדי שלא יאבדו משימות בטעות
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('POST /tasks/lists/leave error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
   app.post('/tasks/push-register', express.json(), async (req, res) => {
     try {
-      const h = req.headers.authorization || '';
-      const decoded = h.startsWith('Bearer ') ? await admin.auth().verifyIdToken(h.slice(7)).catch(() => null) : null;
-      if (!decoded || !SAFE.test(decoded.uid)) return res.status(401).json({ error: 'אין הרשאה' });
+      const decoded = await authUser(req);
+      if (!decoded) return res.status(401).json({ error: 'אין הרשאה' });
       const { token, deviceId } = req.body || {};
       if (!token || typeof token !== 'string' || token.length > 4096 || !SAFE.test(String(deviceId || ''))) {
         return res.status(400).json({ error: 'token ו-deviceId חובה' });
@@ -60,7 +123,10 @@ function register(app, admin, db, express) {
     return result.successCount;
   }
 
-  async function checkUser(uid, tasksPath, tasks, now) {
+  // uids = מי מקבל את התזכורת (משתמש אחד ברשימה פרטית, כל החברים ברשימה משותפת)
+  async function checkUser(uids, tasksPath, tasks, now, prefix) {
+    if (!Array.isArray(uids)) uids = [uids];
+    const send = async (title, body, id) => { for (const u of uids) await sendToUser(u, title, body, id); };
     for (const [id, t] of Object.entries(tasks || {})) {
       if (!t || t.done || !t.date || !SAFE.test(id)) continue;
       const k = t.date + '|' + (t.time || '');
@@ -75,11 +141,11 @@ function register(app, admin, db, express) {
       // ערב לפני - רק אם המשימה נוצרה לפני 20:00 של ערב קודם (לא שולחים "תזכורת למחר" על משימה שנוספה עכשיו להיום)
       if (!rem.eve && now >= eveAt && now - eveAt < MAX_LATE_MS && (!t.created || t.created < eveAt)) {
         upd.eve = true;
-        await sendToUser(uid, '📋 תזכורת למחר: ' + t.name, 'מחר' + (t.time ? ' בשעה ' + t.time : ''), id);
+        await send('📋 תזכורת למחר: ' + (prefix || '') + t.name, 'מחר' + (t.time ? ' בשעה ' + t.time : ''), id);
       }
       if (t.time && !rem.at && now >= taskAt && now - taskAt < MAX_LATE_MS) {
         upd.at = true;
-        await sendToUser(uid, '⏰ הגיע הזמן: ' + t.name, 'עכשיו - ' + t.time, id);
+        await send('⏰ הגיע הזמן: ' + (prefix || '') + t.name, 'עכשיו - ' + t.time, id);
       }
       if (Object.keys(upd).length) await db.ref(`${tasksPath}/${id}/rem`).set({ ...rem, ...upd });
     }
@@ -96,6 +162,12 @@ function register(app, admin, db, express) {
       const users = (await db.ref('todo/users').once('value')).val() || {};
       for (const [uid, u] of Object.entries(users)) {
         if (SAFE.test(uid) && u && u.tasks) await checkUser(uid, `todo/users/${uid}/tasks`, u.tasks, now);
+      }
+      const shared = (await db.ref('todo/shared').once('value')).val() || {};
+      for (const [listId, l] of Object.entries(shared)) {
+        if (!SAFE.test(listId) || !l || !l.tasks) continue;
+        const members = Object.keys(l.members || {}).filter((m) => SAFE.test(m));
+        if (members.length) await checkUser(members, `todo/shared/${listId}/tasks`, l.tasks, now, '[' + (l.name || 'משותף') + '] ');
       }
     } catch (err) {
       console.error('task reminders tick error:', err.message);
