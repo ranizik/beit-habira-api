@@ -909,6 +909,8 @@ analytics.registerAnalytics(app, { db, requireApiKey, VALID_BRANCHES });
 
 // ---------- תזכורות Push לאפליקציית המשימות (רישום מכשיר עם טוקן התחברות + בדיקה כל דקה) ----------
 require('./taskReminders').register(app, admin, db, express);
+// ---------- חיבור קבוע ל-Google Tasks (ההרשאה נשמרת בשרת ומתחדשת לבד, במקום שעה אחת מהדפדפן) ----------
+require('./tasksGcal').register(app, admin, db, express);
 
 // ---------- Middleware אימות לכל שאר הנתיבים ----------
 app.use(requireApiKey);
