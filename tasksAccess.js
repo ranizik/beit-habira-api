@@ -15,7 +15,9 @@ const SAFE = /^[-_A-Za-z0-9]{1,128}$/;
 const OWNER = 'staff-tasks';
 const OWNER_EMAILS = ['ranizik@gmail.com']; // החשבון של בעל העסק ב-Google - אף פעם לא ננעל
 const DAY = 864e5;
-const DEF_CONFIG = { trialDays: 14, price: 20, contact: '0559800017' };
+const DEF_CONFIG = { trialDays: 14, price: 20, contact: '0559800017', approval: true };
+// משתמשים שנרשמו לפני שהופעל 'אישור ידני' - מקבלים ניסיון רגיל ולא נחסמים
+const APPROVAL_SINCE = Date.parse('2026-10-27T16:30:00Z');
 
 function register(app, admin, db, express) {
   async function authUser(req) {
@@ -28,19 +30,28 @@ function register(app, admin, db, express) {
     const fn = require('./taskReminders').sendToUser;
     return fn ? fn(uid, title, body, 'access').catch(() => 0) : Promise.resolve(0);
   };
-  const allowedNow = (a, now) => !!a && !a.locked && (a.until == null || a.until > now);
+  const allowedNow = (a, now) => !!a && !a.pending && !a.locked && (a.until == null || a.until > now);
   const pub = (a, cfg, now) => ({
     allowed: allowedNow(a, now),
-    locked: !!a.locked, plan: a.plan || 'trial', until: a.until == null ? null : a.until,
+    locked: !!a.locked, pending: !!a.pending, plan: a.plan || 'trial', until: a.until == null ? null : a.until,
     daysLeft: a.until == null ? null : Math.max(0, Math.ceil((a.until - now) / DAY)),
     price: cfg.price, contact: cfg.contact,
   });
-  async function ensure(uid, info) {
+  async function ensure(uid, info, created) {
     const ref = db.ref(`todoAccess/users/${uid}`);
     let a = (await ref.once('value')).val();
     if (!a) {
       const cfg = await getConfig();
       const now = Date.now();
+      if (created === undefined) created = await admin.auth().getUser(uid).then((u) => Date.parse(u.metadata.creationTime) || 0).catch(() => 0);
+      const isNew = created >= APPROVAL_SINCE;
+      if (cfg.approval && isNew) {
+        // משתמש חדש - ממתין לאישור של בעל העסק
+        a = { start: now, until: null, locked: false, pending: true, plan: 'trial', name: info.name || '', email: info.email || '', askedAt: now };
+        await ref.set(a);
+        await push(OWNER, '🙋 בקשת הצטרפות לתכל׳ס', (info.name || info.email || 'משתמש חדש') + (info.email && info.name ? ' (' + info.email + ')' : '') + ' – לאשר? 📊 ← משתמשים');
+        return a;
+      }
       a = { start: now, until: now + cfg.trialDays * DAY, locked: false, plan: 'trial', name: info.name || '', email: info.email || '' };
       await ref.set(a);
     } else if (info && ((info.name && info.name !== a.name) || (info.email && info.email !== a.email))) {
@@ -80,7 +91,7 @@ function register(app, admin, db, express) {
       for (const uid of list) {
         const info = authInfo[uid] || {};
         if (OWNER_EMAILS.includes(String(info.email || '').toLowerCase())) continue;
-        const a = acc[uid] || await ensure(uid, info);
+        const a = acc[uid] || await ensure(uid, info, info.created || 0);
         const tasks = Object.values(((todo.users || {})[uid] || {}).tasks || {}).filter(Boolean);
         users.push({
           uid, name: a.name || info.name || '', email: a.email || info.email || '',
@@ -89,7 +100,8 @@ function register(app, admin, db, express) {
           ...pub(a, cfg, now),
         });
       }
-      users.sort((x, y) => (x.allowed === y.allowed ? (x.until || Infinity) - (y.until || Infinity) : x.allowed ? 1 : -1));
+      const rank = (u) => (u.pending ? 0 : u.allowed ? 2 : 1);
+      users.sort((x, y) => rank(x) - rank(y) || (x.until || Infinity) - (y.until || Infinity));
       res.json({ ok: true, config: cfg, users });
     } catch (err) {
       console.error('POST /tasks/access/list error:', err.message);
@@ -103,18 +115,20 @@ function register(app, admin, db, express) {
       if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
       const { uid, action } = req.body || {};
       if (!SAFE.test(String(uid || '')) || uid === OWNER) return res.status(400).json({ error: 'משתמש לא תקף' });
-      const a = await ensure(uid, {});
+      const a = await ensure(uid, {}, 0);
       const now = Date.now();
       const base = Math.max(now, a.until || 0);
       let upd;
-      if (action === 'lock') upd = { locked: true };
-      else if (action === 'month') upd = { locked: false, plan: 'paid', until: base + 30 * DAY, warned: null, ended: null, paidAt: now };
-      else if (action === 'forever') upd = { locked: false, plan: 'free', until: null, warned: null, ended: null };
-      else if (action === 'trial7') upd = { locked: false, until: base + 7 * DAY, warned: null, ended: null };
+      const cfg = await getConfig();
+      if (action === 'lock') upd = { locked: true, pending: null };
+      else if (action === 'approve') upd = { locked: false, pending: null, plan: 'trial', start: now, until: now + cfg.trialDays * DAY, warned: null, ended: null };
+      else if (action === 'month') upd = { locked: false, pending: null, plan: 'paid', until: base + 30 * DAY, warned: null, ended: null, paidAt: now };
+      else if (action === 'forever') upd = { locked: false, pending: null, plan: 'free', until: null, warned: null, ended: null };
+      else if (action === 'trial7') upd = { locked: false, pending: null, until: base + 7 * DAY, warned: null, ended: null };
       else return res.status(400).json({ error: 'פעולה לא תקפה' });
       await db.ref(`todoAccess/users/${uid}`).update(upd);
       const n = { ...a, ...upd };
-      if (action !== 'lock' && !allowedNow(a, now)) await push(uid, '✅ תכל׳ס נפתחה', 'אפשר להמשיך להשתמש באפליקציה');
+      if (action !== 'lock' && !allowedNow(a, now)) await push(uid, a.pending ? '✅ אושרת! ברוך הבא לתכל׳ס' : '✅ תכל׳ס נפתחה', a.pending ? 'אפשר להתחיל – לחץ על המיקרופון ותגיד משימה' : 'אפשר להמשיך להשתמש באפליקציה');
       res.json({ ok: true, ...pub(n, await getConfig(), now) });
     } catch (err) {
       console.error('POST /tasks/access/set error:', err.message);
@@ -130,6 +144,7 @@ function register(app, admin, db, express) {
       const upd = {};
       if (b.trialDays != null) { const v = Math.round(Number(b.trialDays)); if (v >= 1 && v <= 365) upd.trialDays = v; }
       if (b.price != null) { const v = Number(b.price); if (v >= 0 && v <= 10000) upd.price = v; }
+      if (b.approval != null) upd.approval = !!b.approval;
       if (b.contact != null) { const v = String(b.contact).replace(/[^0-9+]/g, '').slice(0, 15); if (v.length >= 9) upd.contact = v; }
       await db.ref('todoAccess/config').update(upd);
       res.json({ ok: true, config: await getConfig() });
@@ -177,7 +192,7 @@ function register(app, admin, db, express) {
 async function blockedSet(db) {
   const acc = (await db.ref('todoAccess/users').once('value')).val() || {};
   const now = Date.now();
-  return new Set(Object.entries(acc).filter(([, a]) => a && (a.locked || (a.until != null && a.until <= now))).map(([u]) => u));
+  return new Set(Object.entries(acc).filter(([, a]) => a && (a.pending || a.locked || (a.until != null && a.until <= now))).map(([u]) => u));
 }
 
 module.exports = { register, blockedSet };
