@@ -191,6 +191,18 @@ function register(app, admin, db, express) {
     <p><a href="https://beit-habira.com/tasks/" style="font-size:18px">פתח את האפליקציה ←</a></p>
     <p><a href="/tasks/privacy">מדיניות פרטיות</a></p>`)));
 
+  // קבצי העזר של Firebase להתחברות עם Google - כדי לארח אותם על beit-habira.com (התחברות באייפון/Safari)
+  // https://firebase.google.com/docs/auth/web/redirect-best-practices (Option 4). רשימה סגורה של קבצים בלבד.
+  const HELPERS = { handler: '/__/auth/handler', 'handler.js': '/__/auth/handler.js', 'experiments.js': '/__/auth/experiments.js', iframe: '/__/auth/iframe', 'iframe.js': '/__/auth/iframe.js', links: '/__/auth/links', 'links.js': '/__/auth/links.js', 'init.json': '/__/firebase/init.json' };
+  app.get('/tasks/auth-helper/:file', async (req, res) => {
+    const p = HELPERS[req.params.file];
+    if (!p) return res.status(404).end();
+    try {
+      const r = await fetch('https://orders-app-78c0f.firebaseapp.com' + p);
+      res.status(r.status).type('text/plain').send(await r.text());
+    } catch (e) { res.status(502).end(); }
+  });
+
   console.log('📅 חיבור Google Tasks קבוע:', configured() ? 'פעיל' : 'ממתין ל-GCAL_CLIENT_SECRET');
 }
 
