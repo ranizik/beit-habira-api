@@ -148,6 +148,7 @@ function register(app, admin, db, express) {
     if (Object.keys(cleanup).length) await db.ref(`todoPushTokens/${uid}`).update(cleanup);
     return result.successCount;
   }
+  module.exports.sendToUser = sendToUser; // גם למודול המנויים (tasksAccess)
 
   // uids = מי מקבל את התזכורת (משתמש אחד ברשימה פרטית, כל החברים ברשימה משותפת)
   async function checkUser(uids, tasksPath, tasks, now, prefix) {
@@ -185,14 +186,16 @@ function register(app, admin, db, express) {
       const now = Date.now();
       const owner = (await db.ref('todo/tasks').once('value')).val();
       await checkUser('staff-tasks', 'todo/tasks', owner, now);
+      // משתמש נעול / שהתקופה שלו נגמרה - לא מקבל תזכורות
+      const blocked = await require('./tasksAccess').blockedSet(db).catch(() => new Set());
       const users = (await db.ref('todo/users').once('value')).val() || {};
       for (const [uid, u] of Object.entries(users)) {
-        if (SAFE.test(uid) && u && u.tasks) await checkUser(uid, `todo/users/${uid}/tasks`, u.tasks, now);
+        if (SAFE.test(uid) && u && u.tasks && !blocked.has(uid)) await checkUser(uid, `todo/users/${uid}/tasks`, u.tasks, now);
       }
       const shared = (await db.ref('todo/shared').once('value')).val() || {};
       for (const [listId, l] of Object.entries(shared)) {
         if (!SAFE.test(listId) || !l || !l.tasks) continue;
-        const members = Object.keys(l.members || {}).filter((m) => SAFE.test(m));
+        const members = Object.keys(l.members || {}).filter((m) => SAFE.test(m) && !blocked.has(m));
         if (members.length) await checkUser(members, `todo/shared/${listId}/tasks`, l.tasks, now, '[' + (l.name || 'משותף') + '] ');
       }
     } catch (err) {

@@ -1,0 +1,183 @@
+/**
+ * מנויים / נעילת משתמשים באפליקציית המשימות (תכל׳ס)
+ *   POST /tasks/access/me                      - כל משתמש: האם מותר לו להשתמש (משתמש חדש מקבל תקופת ניסיון)
+ *   POST /tasks/access/list                    - בעל העסק: כל המשתמשים + מצב המנוי
+ *   POST /tasks/access/set   { uid, action }   - בעל העסק: lock | month | forever | trial7
+ *   POST /tasks/access/config { trialDays, price, contact } - בעל העסק: הגדרות
+ * נשמר ב-Firebase (נגיש רק לשרת):
+ *   todoAccess/users/<uid> = { name, email, start, until, locked, plan: trial|paid|free, warned, ended }
+ *   todoAccess/config      = { trialDays, price, contact }
+ * תזכורות (בדיקה כל 10 דקות):
+ *   יום לפני סוף התקופה  -> הודעה לבעל העסק + למשתמש
+ *   כשהתקופה נגמרת       -> הודעה לבעל העסק ("ננעל/ה - לחדש?")
+ */
+const SAFE = /^[-_A-Za-z0-9]{1,128}$/;
+const OWNER = 'staff-tasks';
+const OWNER_EMAILS = ['ranizik@gmail.com']; // החשבון של בעל העסק ב-Google - אף פעם לא ננעל
+const DAY = 864e5;
+const DEF_CONFIG = { trialDays: 14, price: 20, contact: '0559800017' };
+
+function register(app, admin, db, express) {
+  async function authUser(req) {
+    const h = req.headers.authorization || '';
+    const d = h.startsWith('Bearer ') ? await admin.auth().verifyIdToken(h.slice(7)).catch(() => null) : null;
+    return d && SAFE.test(d.uid) ? d : null;
+  }
+  const getConfig = async () => ({ ...DEF_CONFIG, ...((await db.ref('todoAccess/config').once('value')).val() || {}) });
+  const push = (uid, title, body) => {
+    const fn = require('./taskReminders').sendToUser;
+    return fn ? fn(uid, title, body, 'access').catch(() => 0) : Promise.resolve(0);
+  };
+  const allowedNow = (a, now) => !!a && !a.locked && (a.until == null || a.until > now);
+  const pub = (a, cfg, now) => ({
+    allowed: allowedNow(a, now),
+    locked: !!a.locked, plan: a.plan || 'trial', until: a.until == null ? null : a.until,
+    daysLeft: a.until == null ? null : Math.max(0, Math.ceil((a.until - now) / DAY)),
+    price: cfg.price, contact: cfg.contact,
+  });
+  async function ensure(uid, info) {
+    const ref = db.ref(`todoAccess/users/${uid}`);
+    let a = (await ref.once('value')).val();
+    if (!a) {
+      const cfg = await getConfig();
+      const now = Date.now();
+      a = { start: now, until: now + cfg.trialDays * DAY, locked: false, plan: 'trial', name: info.name || '', email: info.email || '' };
+      await ref.set(a);
+    } else if (info && ((info.name && info.name !== a.name) || (info.email && info.email !== a.email))) {
+      await ref.update({ name: info.name || a.name || '', email: info.email || a.email || '' });
+    }
+    return a;
+  }
+
+  app.post('/tasks/access/me', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      if (d.uid === OWNER || (d.email_verified && OWNER_EMAILS.includes(String(d.email || '').toLowerCase()))) return res.json({ ok: true, allowed: true, owner: true });
+      const a = await ensure(d.uid, { name: d.name || '', email: d.email || '' });
+      res.json({ ok: true, ...pub(a, await getConfig(), Date.now()) });
+    } catch (err) {
+      console.error('POST /tasks/access/me error:', err.message);
+      res.status(200).json({ ok: false, allowed: true }); // תקלה בשרת לא נועלת משתמשים
+    }
+  });
+
+  app.post('/tasks/access/list', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
+      const [acc, todo, stats] = await Promise.all(['todoAccess/users', 'todo', 'todoStats/users'].map((p) => db.ref(p).once('value').then((s) => s.val() || {})));
+      const uids = new Set([...Object.keys(acc), ...Object.keys(todo.users || {}), ...Object.keys(stats)].filter((u) => u !== OWNER && SAFE.test(u)));
+      const authInfo = {};
+      const list = [...uids];
+      for (let i = 0; i < list.length; i += 100) {
+        const r = await admin.auth().getUsers(list.slice(i, i + 100).map((uid) => ({ uid })));
+        r.users.forEach((u) => { authInfo[u.uid] = { name: u.displayName || '', email: u.email || '', created: Date.parse(u.metadata.creationTime) || null }; });
+      }
+      const cfg = await getConfig();
+      const now = Date.now();
+      const users = [];
+      for (const uid of list) {
+        const info = authInfo[uid] || {};
+        if (OWNER_EMAILS.includes(String(info.email || '').toLowerCase())) continue;
+        const a = acc[uid] || await ensure(uid, info);
+        const tasks = Object.values(((todo.users || {})[uid] || {}).tasks || {}).filter(Boolean);
+        users.push({
+          uid, name: a.name || info.name || '', email: a.email || info.email || '',
+          joined: info.created || a.start || null, last: (stats[uid] || {}).last || null,
+          tasks: tasks.length, open: tasks.filter((t) => !t.done).length,
+          ...pub(a, cfg, now),
+        });
+      }
+      users.sort((x, y) => (x.allowed === y.allowed ? (x.until || Infinity) - (y.until || Infinity) : x.allowed ? 1 : -1));
+      res.json({ ok: true, config: cfg, users });
+    } catch (err) {
+      console.error('POST /tasks/access/list error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
+  app.post('/tasks/access/set', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
+      const { uid, action } = req.body || {};
+      if (!SAFE.test(String(uid || '')) || uid === OWNER) return res.status(400).json({ error: 'משתמש לא תקף' });
+      const a = await ensure(uid, {});
+      const now = Date.now();
+      const base = Math.max(now, a.until || 0);
+      let upd;
+      if (action === 'lock') upd = { locked: true };
+      else if (action === 'month') upd = { locked: false, plan: 'paid', until: base + 30 * DAY, warned: null, ended: null, paidAt: now };
+      else if (action === 'forever') upd = { locked: false, plan: 'free', until: null, warned: null, ended: null };
+      else if (action === 'trial7') upd = { locked: false, until: base + 7 * DAY, warned: null, ended: null };
+      else return res.status(400).json({ error: 'פעולה לא תקפה' });
+      await db.ref(`todoAccess/users/${uid}`).update(upd);
+      const n = { ...a, ...upd };
+      if (action !== 'lock' && !allowedNow(a, now)) await push(uid, '✅ תכל׳ס נפתחה', 'אפשר להמשיך להשתמש באפליקציה');
+      res.json({ ok: true, ...pub(n, await getConfig(), now) });
+    } catch (err) {
+      console.error('POST /tasks/access/set error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
+  app.post('/tasks/access/config', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
+      const b = req.body || {};
+      const upd = {};
+      if (b.trialDays != null) { const v = Math.round(Number(b.trialDays)); if (v >= 1 && v <= 365) upd.trialDays = v; }
+      if (b.price != null) { const v = Number(b.price); if (v >= 0 && v <= 10000) upd.price = v; }
+      if (b.contact != null) { const v = String(b.contact).replace(/[^0-9+]/g, '').slice(0, 15); if (v.length >= 9) upd.contact = v; }
+      await db.ref('todoAccess/config').update(upd);
+      res.json({ ok: true, config: await getConfig() });
+    } catch (err) {
+      console.error('POST /tasks/access/config error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
+  // ---------- תזכורות סוף תקופה ----------
+  let running = false;
+  async function tick() {
+    if (running) return;
+    running = true;
+    try {
+      const now = Date.now();
+      const acc = (await db.ref('todoAccess/users').once('value')).val() || {};
+      for (const [uid, a] of Object.entries(acc)) {
+        if (!a || !SAFE.test(uid) || uid === OWNER || a.locked || a.until == null) continue;
+        const who = a.name || a.email || 'משתמש';
+        const paid = a.plan === 'paid';
+        if (a.until > now && a.until - now <= DAY && a.warned !== a.until) {
+          await db.ref(`todoAccess/users/${uid}/warned`).set(a.until);
+          await push(OWNER, '⏳ ' + who + ': ' + (paid ? 'המנוי נגמר מחר' : 'הניסיון נגמר מחר'), 'כדאי לדבר איתה/ו על המשך – 📊 ← משתמשים');
+          await push(uid, '⏳ ' + (paid ? 'המנוי שלך בתכל׳ס נגמר מחר' : 'תקופת הניסיון בתכל׳ס נגמרת מחר'), 'כדי להמשיך להשתמש – פנה/י לרני');
+        }
+        if (a.until <= now && a.ended !== a.until && now - a.until < 7 * DAY) {
+          await db.ref(`todoAccess/users/${uid}/ended`).set(a.until);
+          await push(OWNER, '🔒 ' + who + ' – ' + (paid ? 'המנוי נגמר' : 'הניסיון נגמר'), 'הגישה ננעלה. לפתוח לחודש? 📊 ← משתמשים');
+        }
+      }
+    } catch (err) {
+      console.error('access tick error:', err.message);
+    } finally {
+      running = false;
+    }
+  }
+  module.exports._tick = tick;
+  setInterval(tick, 10 * 60 * 1000);
+  setTimeout(tick, 20000);
+  console.log('🔐 מנויי משימות פעילים');
+}
+
+// לשימוש של מודול התזכורות: מי חסום (נעול / תקופה נגמרה)
+async function blockedSet(db) {
+  const acc = (await db.ref('todoAccess/users').once('value')).val() || {};
+  const now = Date.now();
+  return new Set(Object.entries(acc).filter(([, a]) => a && (a.locked || (a.until != null && a.until <= now))).map(([u]) => u));
+}
+
+module.exports = { register, blockedSet };
