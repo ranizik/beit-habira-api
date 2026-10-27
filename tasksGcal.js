@@ -191,6 +191,57 @@ function register(app, admin, db, express) {
     <p><a href="https://beit-habira.com/tasks/" style="font-size:18px">פתח את האפליקציה ←</a></p>
     <p><a href="/tasks/privacy">מדיניות פרטיות</a></p>`)));
 
+  // ---------- כניסה עם Google לאפליקציית המשימות - דרך השרת ----------
+  // ב-Firebase כבויה יצירת משתמשים מהדפדפן (הקשחת אבטחה), ולכן כניסה ישירה עם Google נכשלת למשתמש חדש
+  // (auth/admin-restricted-operation). כאן השרת מאמת את Google, יוצר/מוצא את המשתמש, ומחזיר טוקן כניסה.
+  // משתמש שכבר נכנס בעבר עם Google מקבל את אותו חשבון (לפי האימייל) - המשימות שלו נשמרות.
+  const loginHits = {};
+  const tooMany = (ip) => { const now = Date.now(); const a = (loginHits[ip] || []).filter((t) => now - t < 60000); a.push(now); loginHits[ip] = a; return a.length > 20; };
+  async function verifyGoogleIdToken(cred) {
+    if (!cred || typeof cred !== 'string' || cred.length > 4096) return null;
+    const r = await fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(cred));
+    const p = await r.json().catch(() => ({}));
+    if (!r.ok || p.aud !== CLIENT_ID || !['accounts.google.com', 'https://accounts.google.com'].includes(p.iss)) return null;
+    if (String(p.email_verified) !== 'true' || !p.email || Number(p.exp) * 1000 < Date.now()) return null;
+    return p;
+  }
+  async function customTokenFor(p) {
+    let uid;
+    try { uid = (await admin.auth().getUserByEmail(p.email)).uid; }
+    catch (e) {
+      if (e.code !== 'auth/user-not-found') throw e;
+      uid = (await admin.auth().createUser({ email: p.email, emailVerified: true, displayName: p.name || undefined, photoURL: p.picture || undefined })).uid;
+    }
+    if (!SAFE.test(uid) || uid.startsWith('staff-')) throw new Error('חשבון לא תקין');
+    return admin.auth().createCustomToken(uid);
+  }
+  app.post('/tasks/google-login', express.json(), async (req, res) => {
+    try {
+      if (tooMany(req.ip)) return res.status(429).json({ error: 'יותר מדי ניסיונות, נסה שוב בעוד דקה' });
+      const p = await verifyGoogleIdToken((req.body || {}).credential);
+      if (!p) return res.status(401).json({ error: 'האימות מול Google נכשל' });
+      res.json({ ok: true, token: await customTokenFor(p) });
+    } catch (err) {
+      console.error('POST /tasks/google-login error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+  // אייפון / אפליקציה מהמסך הבית: Google שולח לכאן את האישור (טופס), ומשם חוזרים לאפליקציה עם טוקן כניסה בסימן #
+  app.post('/tasks/google-login-redirect', express.urlencoded({ extended: false }), async (req, res) => {
+    const back = (hash) => res.redirect(303, 'https://beit-habira.com/tasks/#' + hash);
+    try {
+      if (tooMany(req.ip)) return back('lerr=' + encodeURIComponent('יותר מדי ניסיונות'));
+      const cookieCsrf = (String(req.headers.cookie || '').match(/(?:^|;\s*)g_csrf_token=([^;]+)/) || [])[1];
+      if (!cookieCsrf || cookieCsrf !== (req.body || {}).g_csrf_token) return back('lerr=' + encodeURIComponent('בדיקת אבטחה נכשלה - נסה שוב'));
+      const p = await verifyGoogleIdToken((req.body || {}).credential);
+      if (!p) return back('lerr=' + encodeURIComponent('האימות מול Google נכשל'));
+      back('ct=' + encodeURIComponent(await customTokenFor(p)));
+    } catch (err) {
+      console.error('POST /tasks/google-login-redirect error:', err.message);
+      back('lerr=' + encodeURIComponent('שגיאת שרת'));
+    }
+  });
+
   // קבצי העזר של Firebase להתחברות עם Google - כדי לארח אותם על beit-habira.com (התחברות באייפון/Safari)
   // https://firebase.google.com/docs/auth/web/redirect-best-practices (Option 4). רשימה סגורה של קבצים בלבד.
   const HELPERS = { handler: '/__/auth/handler', 'handler.js': '/__/auth/handler.js', 'experiments.js': '/__/auth/experiments.js', iframe: '/__/auth/iframe', 'iframe.js': '/__/auth/iframe.js', links: '/__/auth/links', 'links.js': '/__/auth/links.js', 'init.json': '/__/firebase/init.json' };
