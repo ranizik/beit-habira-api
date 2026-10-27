@@ -72,6 +72,32 @@ function register(app, admin, db, express) {
     }
   });
 
+  // התראה לשאר חברי רשימה משותפת כשמישהו מוסיף משימה ("נוגה הוסיפה: ...")
+  const notifyHits = {};
+  app.post('/tasks/lists/notify', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      const { listId } = req.body || {};
+      const name = String((req.body || {}).name || '').trim().slice(0, 120);
+      if (!SAFE.test(String(listId || '')) || !name) return res.status(400).json({ error: 'חסרים פרטים' });
+      const now = Date.now();
+      const hits = (notifyHits[d.uid] || []).filter((t) => now - t < 3600000);
+      if (hits.length >= 60) return res.json({ ok: false, error: 'יותר מדי התראות' });
+      hits.push(now); notifyHits[d.uid] = hits;
+      const list = (await db.ref(`todo/shared/${listId}`).once('value')).val();
+      if (!list || !list.members || !list.members[d.uid]) return res.status(403).json({ error: 'לא חבר ברשימה' });
+      const who = (list.members[d.uid] && list.members[d.uid].name) || displayName(d);
+      const others = Object.keys(list.members).filter((u) => u !== d.uid && SAFE.test(u));
+      let sent = 0;
+      for (const u of others) sent += await sendToUser(u, '👥 ' + (list.name || 'רשימה משותפת'), who + ' הוסיף/ה: ' + name, 'list-' + listId);
+      res.json({ ok: true, sent });
+    } catch (err) {
+      console.error('POST /tasks/lists/notify error:', err.message);
+      res.status(200).json({ ok: false });
+    }
+  });
+
   app.post('/tasks/lists/leave', express.json(), async (req, res) => {
     try {
       const d = await authUser(req);
