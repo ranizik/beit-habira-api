@@ -15,7 +15,8 @@ const SAFE = /^[-_A-Za-z0-9]{1,128}$/;
 const OWNER = 'staff-tasks';
 const OWNER_EMAILS = ['ranizik@gmail.com']; // החשבון של בעל העסק ב-Google - אף פעם לא ננעל
 const DAY = 864e5;
-const DEF_CONFIG = { trialDays: 14, price: 20, contact: '0559800017', approval: true };
+// freeMode = תקופת הרצה: כל מי שאושר משתמש בחינם בלי הגבלת זמן (אין נעילה אוטומטית ואין תזכורות סוף תקופה)
+const DEF_CONFIG = { trialDays: 14, price: 20, contact: '0559800017', approval: true, freeMode: true };
 // משתמשים שנרשמו לפני שהופעל 'אישור ידני' - מקבלים ניסיון רגיל ולא נחסמים
 const APPROVAL_SINCE = Date.parse('2026-10-27T16:30:00Z');
 
@@ -30,11 +31,11 @@ function register(app, admin, db, express) {
     const fn = require('./taskReminders').sendToUser;
     return fn ? fn(uid, title, body, 'access').catch(() => 0) : Promise.resolve(0);
   };
-  const allowedNow = (a, now) => !!a && !a.pending && !a.locked && (a.until == null || a.until > now);
+  const allowedNow = (a, now, cfg) => !!a && !a.pending && !a.locked && ((cfg && cfg.freeMode) || a.until == null || a.until > now);
   const pub = (a, cfg, now) => ({
-    allowed: allowedNow(a, now),
+    allowed: allowedNow(a, now, cfg), freeMode: !!cfg.freeMode,
     locked: !!a.locked, pending: !!a.pending, plan: a.plan || 'trial', until: a.until == null ? null : a.until,
-    daysLeft: a.until == null ? null : Math.max(0, Math.ceil((a.until - now) / DAY)),
+    daysLeft: (a.until == null || cfg.freeMode) ? null : Math.max(0, Math.ceil((a.until - now) / DAY)),
     price: cfg.price, contact: cfg.contact,
   });
   async function ensure(uid, info, created) {
@@ -128,7 +129,7 @@ function register(app, admin, db, express) {
       else return res.status(400).json({ error: 'פעולה לא תקפה' });
       await db.ref(`todoAccess/users/${uid}`).update(upd);
       const n = { ...a, ...upd };
-      if (action !== 'lock' && !allowedNow(a, now)) await push(uid, a.pending ? '✅ אושרת! ברוך הבא לתכל׳ס' : '✅ תכל׳ס נפתחה', a.pending ? 'אפשר להתחיל – לחץ על המיקרופון ותגיד משימה' : 'אפשר להמשיך להשתמש באפליקציה');
+      if (action !== 'lock' && !allowedNow(a, now, cfg)) await push(uid, a.pending ? '✅ אושרת! ברוך הבא לתכל׳ס' : '✅ תכל׳ס נפתחה', a.pending ? 'אפשר להתחיל – לחץ על המיקרופון ותגיד משימה' : 'אפשר להמשיך להשתמש באפליקציה');
       res.json({ ok: true, ...pub(n, await getConfig(), now) });
     } catch (err) {
       console.error('POST /tasks/access/set error:', err.message);
@@ -145,6 +146,7 @@ function register(app, admin, db, express) {
       if (b.trialDays != null) { const v = Math.round(Number(b.trialDays)); if (v >= 1 && v <= 365) upd.trialDays = v; }
       if (b.price != null) { const v = Number(b.price); if (v >= 0 && v <= 10000) upd.price = v; }
       if (b.approval != null) upd.approval = !!b.approval;
+      if (b.freeMode != null) upd.freeMode = !!b.freeMode;
       if (b.contact != null) { const v = String(b.contact).replace(/[^0-9+]/g, '').slice(0, 15); if (v.length >= 9) upd.contact = v; }
       await db.ref('todoAccess/config').update(upd);
       res.json({ ok: true, config: await getConfig() });
@@ -161,6 +163,7 @@ function register(app, admin, db, express) {
     running = true;
     try {
       const now = Date.now();
+      if ((await getConfig()).freeMode) return; // תקופת הרצה - אין סוף תקופה
       const acc = (await db.ref('todoAccess/users').once('value')).val() || {};
       for (const [uid, a] of Object.entries(acc)) {
         if (!a || !SAFE.test(uid) || uid === OWNER || a.locked || a.until == null) continue;
@@ -191,8 +194,9 @@ function register(app, admin, db, express) {
 // לשימוש של מודול התזכורות: מי חסום (נעול / תקופה נגמרה)
 async function blockedSet(db) {
   const acc = (await db.ref('todoAccess/users').once('value')).val() || {};
+  const free = { ...DEF_CONFIG, ...((await db.ref('todoAccess/config').once('value')).val() || {}) }.freeMode;
   const now = Date.now();
-  return new Set(Object.entries(acc).filter(([, a]) => a && (a.pending || a.locked || (a.until != null && a.until <= now))).map(([u]) => u));
+  return new Set(Object.entries(acc).filter(([, a]) => a && (a.pending || a.locked || (!free && a.until != null && a.until <= now))).map(([u]) => u));
 }
 
 module.exports = { register, blockedSet };
