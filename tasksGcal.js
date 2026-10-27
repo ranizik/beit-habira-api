@@ -59,7 +59,7 @@ function register(app, admin, db, express) {
 
   function gtaskBody(t) {
     return {
-      title: (t.time ? t.time + ' ' : '') + String(t.name || '').slice(0, 900),
+      title: String(t.name || '').slice(0, 900), // השעה לא בשם - היא בפרטי המשימה (Google לא שומר שעה במשימה מ-API)
       notes: 'נוסף מאפליקציית המשימות' + (t.time ? ' | שעה: ' + t.time : ''),
       due: t.date + 'T00:00:00.000Z',
       status: t.done ? 'completed' : 'needsAction',
