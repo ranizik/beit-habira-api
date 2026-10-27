@@ -167,6 +167,30 @@ function register(app, admin, db, express) {
     }
   });
 
+  // מדיניות פרטיות ודף בית לאפליקציית המשימות - נדרשים ע"י Google כדי לפרסם את מסך ההרשאה (במקום מצב "בדיקה")
+  const infoPage = (title, body) => '<!DOCTYPE html><html lang="he" dir="rtl"><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + title + '</title>'
+    + '<body style="font-family:Arial,sans-serif;max-width:720px;margin:0 auto;padding:24px 16px;line-height:1.7;color:#222"><h1 style="color:#E53935">' + title + '</h1>' + body
+    + '<p style="color:#888;font-size:13px;margin-top:32px">עודכן: אוקטובר 2026</p></body></html>';
+  app.get('/tasks/privacy', (req, res) => res.type('html').send(infoPage('מדיניות פרטיות – אפליקציית המשימות', `
+    <p>אפליקציית המשימות (beit-habira.com/tasks) מופעלת ע"י בית הבירה והיין. העמוד מסביר איזה מידע נשמר ולמה.</p>
+    <h3>מה נשמר</h3><ul>
+    <li>שם וכתובת אימייל מחשבון Google שאיתו נכנסת – כדי לזהות אותך ולהציג את שמך ברשימות משותפות.</li>
+    <li>המשימות שיצרת (שם, תאריך, שעה, סטטוס) והרשימות המשותפות שאתה חבר בהן.</li>
+    <li>מזהה מכשיר לשליחת התראות, אם אישרת התראות.</li>
+    <li>אם חיברת את Google Tasks: הרשאת גישה לרשימת המשימות שלך ב-Google, שמשמשת רק כדי להוסיף, לעדכן ולמחוק את המשימות שנוצרו באפליקציה.</li>
+    <li>נתוני שימוש מצרפיים (מספר פתיחות, תאריך כניסה אחרונה, סוג מכשיר) – לשיפור האפליקציה.</li></ul>
+    <h3>מה לא עושים</h3><ul>
+    <li>לא מוכרים ולא מעבירים מידע לאף גורם.</li>
+    <li>לא קוראים משימות אחרות בחשבון Google שלך, ולא ניגשים ליומן, למייל או לקבצים.</li></ul>
+    <p>השימוש במידע שמתקבל מ-Google API עומד ב-Google API Services User Data Policy, כולל דרישות ה-Limited Use.</p>
+    <h3>מחיקה וניתוק</h3>
+    <p>אפשר לנתק את Google Tasks בכל רגע מתוך האפליקציה (כפתור 📅) או ב-myaccount.google.com/permissions. למחיקת כל המידע שלך פנה אלינו: ranizik@gmail.com</p>`)));
+  app.get('/tasks/home', (req, res) => res.type('html').send(infoPage('אפליקציית המשימות', `
+    <p>אפליקציית משימות בעברית: אומרים את המשימה בקול ("מחר בשמונה בערב לקנות חלב"), והיא נכנסת עם תאריך ושעה, מקבלים תזכורת לטלפון, והמשימה מופיעה גם ב-Google Tasks.</p>
+    <p>אפשר לנהל משימות פרטיות ורשימות משותפות עם אחרים.</p>
+    <p><a href="https://beit-habira.com/tasks/" style="font-size:18px">פתח את האפליקציה ←</a></p>
+    <p><a href="/tasks/privacy">מדיניות פרטיות</a></p>`)));
+
   console.log('📅 חיבור Google Tasks קבוע:', configured() ? 'פעיל' : 'ממתין ל-GCAL_CLIENT_SECRET');
 }
 
