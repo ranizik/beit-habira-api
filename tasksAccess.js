@@ -199,4 +199,4 @@ async function blockedSet(db) {
   return new Set(Object.entries(acc).filter(([, a]) => a && (a.pending || a.locked || (!free && a.until != null && a.until <= now))).map(([u]) => u));
 }
 
-module.exports = { register, blockedSet };
+module.exports = { register, blockedSet, OWNER_EMAILS };

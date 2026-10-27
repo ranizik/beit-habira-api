@@ -72,17 +72,20 @@ function register(app, admin, db, express) {
       const uids = new Set([...Object.keys(sUsers), ...Object.keys(todo.users || {})].filter((u) => u !== OWNER && SAFE.test(u)));
       Object.values(todo.shared || {}).forEach((l) => Object.keys((l && l.members) || {}).forEach((u) => u !== OWNER && SAFE.test(u) && uids.add(u)));
       const created = {};
+      const ownerUids = new Set();
+      const { OWNER_EMAILS } = require('./tasksAccess');
       const list = [...uids];
       for (let i = 0; i < list.length; i += 100) {
         const r = await admin.auth().getUsers(list.slice(i, i + 100).map((uid) => ({ uid })));
         r.users.forEach((u) => {
           created[u.uid] = Date.parse(u.metadata.creationTime) || null;
+          if (OWNER_EMAILS.includes(String(u.email || '').toLowerCase())) ownerUids.add(u.uid); // החשבון הפרטי של בעל העסק - לא נספר
           const ls = Date.parse(u.metadata.lastRefreshTime || u.metadata.lastSignInTime) || 0;
           if (!sUsers[u.uid]) sUsers[u.uid] = {};
           if (!sUsers[u.uid].last || ls > sUsers[u.uid].last) sUsers[u.uid] = { ...sUsers[u.uid], last: ls };
         });
       }
-      const users = list.map((uid) => ({ uid, first: created[uid] || (sUsers[uid] && sUsers[uid].first) || null, s: sUsers[uid] || {} }));
+      const users = list.filter((uid) => !ownerUids.has(uid)).map((uid) => ({ uid, first: created[uid] || (sUsers[uid] && sUsers[uid].first) || null, s: sUsers[uid] || {} }));
       const since = (ms) => users.filter((u) => u.s.last && now - u.s.last < ms).length;
 
       // משימות - מכל הרשימות (פרטיות של בעל העסק, של כל משתמש, משותפות)
@@ -97,14 +100,14 @@ function register(app, admin, db, express) {
         const dd = daily[key] || {};
         days.push({
           day: key,
-          active: Object.keys(dd.active || {}).filter((u) => u !== OWNER).length,
+          active: Object.keys(dd.active || {}).filter((u) => u !== OWNER && !ownerUids.has(u)).length,
           newUsers: users.filter((u) => u.first && ilDay(u.first) === key).length,
           tasks: allTasks.filter((t) => t.created && ilDay(t.created) === key).length,
           installs: Number(dd.install) || 0,
         });
       }
       const sum = (f) => Object.values(daily).reduce((a, dd) => a + (Number(dd && dd[f]) || 0), 0);
-      const pushUsers = Object.keys(push).filter((u) => u !== OWNER).length;
+      const pushUsers = Object.keys(push).filter((u) => u !== OWNER && !ownerUids.has(u)).length;
 
       res.json({
         ok: true,
@@ -128,7 +131,7 @@ function register(app, admin, db, express) {
           voice: sum('task_voice'), typed: sum('task_typed'),
           sharedLists: Object.keys(todo.shared || {}).length,
           pushUsers,
-          gcalUsers: Object.keys(gcal).filter((u) => u !== OWNER).length,
+          gcalUsers: Object.keys(gcal).filter((u) => u !== OWNER && !ownerUids.has(u)).length,
         },
         days,
       });
