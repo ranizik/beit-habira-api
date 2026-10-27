@@ -231,8 +231,16 @@ function register(app, admin, db, express) {
     const back = (hash) => res.redirect(303, 'https://beit-habira.com/tasks/#' + hash);
     try {
       if (tooMany(req.ip)) return back('lerr=' + encodeURIComponent('יותר מדי ניסיונות'));
+      // הגנת CSRF: עוגיית g_csrf_token של Google נשמרת על beit-habira.com ולא מגיעה לשרת הזה (דומיין אחר),
+      // לכן מאמתים שהטופס נשלח מדף ההתחברות של Google עצמו (Origin/Referer), או לפי העוגייה אם קיימת
       const cookieCsrf = (String(req.headers.cookie || '').match(/(?:^|;\s*)g_csrf_token=([^;]+)/) || [])[1];
-      if (!cookieCsrf || cookieCsrf !== (req.body || {}).g_csrf_token) return back('lerr=' + encodeURIComponent('בדיקת אבטחה נכשלה - נסה שוב'));
+      const from = String(req.headers.origin || req.headers.referer || '');
+      const fromGoogle = /^https:\/\/accounts\.google\.com(\/|$)/.test(from);
+      const cookieOk = cookieCsrf && cookieCsrf === (req.body || {}).g_csrf_token;
+      if (!fromGoogle && !cookieOk) {
+        console.warn('google-login-redirect rejected, origin:', from.slice(0, 60));
+        return back('lerr=' + encodeURIComponent('בדיקת אבטחה נכשלה - נסה שוב'));
+      }
       const p = await verifyGoogleIdToken((req.body || {}).credential);
       if (!p) return back('lerr=' + encodeURIComponent('האימות מול Google נכשל'));
       back('ct=' + encodeURIComponent(await customTokenFor(p)));
