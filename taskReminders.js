@@ -31,6 +31,8 @@ function register(app, admin, db, express) {
   }
   const displayName = (d) => String(d.uid === 'staff-tasks' ? 'רני' : (d.name || (d.email || '').split('@')[0] || 'משתמש')).slice(0, 40);
   const randomCode = () => require('crypto').randomBytes(9).toString('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, 10);
+  // יומן פעילות של רשימה משותפת: מי הצטרף / יצא / צורף ע"י מי
+  const logList = (listId, ev) => db.ref(`todo/shared/${listId}/log`).push({ ...ev, at: Date.now() }).catch(() => {});
 
   // ---------- רשימות משותפות: יצירה / הצטרפות בקישור / יציאה ----------
   // todo/shared/<listId> = { name, owner, invite, created, members: { uid: { name, at } }, tasks: {...} }
@@ -48,6 +50,7 @@ function register(app, admin, db, express) {
       const invite = randomCode();
       await ref.set({ name, owner: d.uid, invite, created: Date.now(), members: { [d.uid]: { name: displayName(d), at: Date.now() } } });
       await db.ref(`todo/userLists/${d.uid}/${ref.key}`).set(true);
+      await logList(ref.key, { type: 'create', uid: d.uid, name: displayName(d) });
       res.json({ ok: true, listId: ref.key, invite });
     } catch (err) {
       console.error('POST /tasks/lists/create error:', err.message);
@@ -63,7 +66,12 @@ function register(app, admin, db, express) {
       if (!SAFE.test(String(listId || '')) || !invite) return res.status(400).json({ error: 'קישור לא תקין' });
       const list = (await db.ref(`todo/shared/${listId}`).once('value')).val();
       if (!list || !list.invite || String(invite) !== String(list.invite)) return res.status(404).json({ error: 'הקישור לא תקף או שהרשימה נמחקה' });
-      await db.ref(`todo/shared/${listId}/members/${d.uid}`).set({ name: displayName(d), at: Date.now() });
+      const already = !!(list.members && list.members[d.uid]);
+      if (!already) {
+        await db.ref(`todo/shared/${listId}/members/${d.uid}`).set({ name: displayName(d), at: Date.now(), via: 'link' });
+        await logList(listId, { type: 'join', uid: d.uid, name: displayName(d) });
+        if (list.owner && list.owner !== d.uid) await sendToUser(list.owner, '👥 ' + (list.name || 'רשימה משותפת'), displayName(d) + ' הצטרף/ה לרשימה', 'list-' + listId).catch(() => 0);
+      }
       await db.ref(`todo/userLists/${d.uid}/${listId}`).set(true);
       res.json({ ok: true, listId, name: list.name });
     } catch (err) {
@@ -110,12 +118,109 @@ function register(app, admin, db, express) {
       if (!d) return res.status(401).json({ error: 'אין הרשאה' });
       const { listId } = req.body || {};
       if (!SAFE.test(String(listId || ''))) return res.status(400).json({ error: 'רשימה לא תקינה' });
+      const lv = (await db.ref(`todo/shared/${listId}`).once('value')).val();
+      const wasMember = !!(lv && lv.members && lv.members[d.uid]);
       await db.ref(`todo/shared/${listId}/members/${d.uid}`).remove();
       await db.ref(`todo/userLists/${d.uid}/${listId}`).remove();
+      if (wasMember) {
+        await logList(listId, { type: 'leave', uid: d.uid, name: (lv.members[d.uid] && lv.members[d.uid].name) || displayName(d) });
+        if (lv.owner && lv.owner !== d.uid && lv.members[lv.owner]) await sendToUser(lv.owner, '👥 ' + (lv.name || 'רשימה משותפת'), ((lv.members[d.uid] && lv.members[d.uid].name) || displayName(d)) + ' יצא/ה מהרשימה', 'list-' + listId).catch(() => 0);
+      }
       // הרשימה עצמה לא נמחקת לעולם (גם כשכולם יצאו) - כדי שלא יאבדו משימות בטעות
       res.json({ ok: true });
     } catch (err) {
       console.error('POST /tasks/lists/leave error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
+  // ---------- פרטי רשימה: משתתפים, פעילות, יומן הצטרפות/יציאה ----------
+  app.post('/tasks/lists/info', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      const { listId } = req.body || {};
+      if (!SAFE.test(String(listId || ''))) return res.status(400).json({ error: 'רשימה לא תקינה' });
+      const list = (await db.ref(`todo/shared/${listId}`).once('value')).val();
+      if (!list || !list.members || !list.members[d.uid]) return res.status(403).json({ error: 'לא חבר ברשימה' });
+      const stats = (await db.ref('todoStats/users').once('value')).val() || {};
+      const tasks = Object.values(list.tasks || {}).filter(Boolean);
+      const members = Object.entries(list.members).filter(([u, m]) => SAFE.test(u) && m).map(([uid, m]) => {
+        const mine = tasks.filter((t) => t.byUid === uid || (!t.byUid && t.by && t.by === m.name));
+        const lastTask = mine.reduce((a, t) => Math.max(a, Number(t.created) || 0, Number(t.doneAt) || 0), 0);
+        return {
+          uid, name: m.name || 'חבר/ה', at: m.at || null, by: m.byName || '', via: m.via || (uid === list.owner ? 'owner' : ''),
+          owner: uid === list.owner, me: uid === d.uid,
+          lastSeen: Math.max((stats[uid] || {}).last || 0, lastTask) || null,
+          added: mine.length,
+          assignedOpen: tasks.filter((t) => !t.done && t.who && t.who.uid === uid).length,
+        };
+      }).sort((a, b) => (b.owner - a.owner) || ((b.lastSeen || 0) - (a.lastSeen || 0)));
+      const log = Object.values(list.log || {}).filter(Boolean).sort((a, b) => b.at - a.at).slice(0, 40);
+      res.json({ ok: true, name: list.name, count: members.length, members, log, tasks: tasks.length, open: tasks.filter((t) => !t.done).length });
+    } catch (err) {
+      console.error('POST /tasks/lists/info error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
+  // אנשי קשר = מי שכבר נמצא איתי ברשימה משותפת כלשהי (אפשר לצרף אותם ישר, בלי קישור)
+  async function myContacts(uid) {
+    const ids = Object.keys((await db.ref(`todo/userLists/${uid}`).once('value')).val() || {}).filter((x) => SAFE.test(x));
+    const out = {};
+    for (const id of ids) {
+      const m = (await db.ref(`todo/shared/${id}/members`).once('value')).val() || {};
+      for (const [u, v] of Object.entries(m)) if (u !== uid && SAFE.test(u) && v) out[u] = out[u] || { uid: u, name: v.name || 'חבר/ה' };
+    }
+    return out;
+  }
+  app.post('/tasks/lists/contacts', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      const c = await myContacts(d.uid);
+      res.json({ ok: true, contacts: Object.values(c).sort((a, b) => String(a.name).localeCompare(String(b.name), 'he')) });
+    } catch (err) {
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
+  // צירוף ישיר לרשימה (בלי קישור): איש קשר קיים, או משתמש מאושר של האפליקציה לפי מייל
+  const addHits = {};
+  app.post('/tasks/lists/add', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      const now = Date.now();
+      const hits = (addHits[d.uid] || []).filter((t) => now - t < 3600000);
+      if (hits.length >= 40) return res.json({ ok: false, error: 'יותר מדי צירופים - נסה שוב מאוחר יותר' });
+      hits.push(now); addHits[d.uid] = hits;
+      const { listId } = req.body || {};
+      if (!SAFE.test(String(listId || ''))) return res.status(400).json({ error: 'רשימה לא תקינה' });
+      const list = (await db.ref(`todo/shared/${listId}`).once('value')).val();
+      if (!list || !list.members || !list.members[d.uid]) return res.status(403).json({ error: 'לא חבר ברשימה' });
+      let target = null, tName = '';
+      const contacts = await myContacts(d.uid);
+      if (req.body.uid && contacts[req.body.uid]) { target = req.body.uid; tName = contacts[target].name; }
+      else if (req.body.email) {
+        const email = String(req.body.email).trim().toLowerCase().slice(0, 200);
+        const u = await admin.auth().getUserByEmail(email).catch(() => null);
+        if (u) {
+          const acc = (await db.ref(`todoAccess/users/${u.uid}`).once('value')).val();
+          const isOwnerAcc = ['ranizik@gmail.com'].includes(email);
+          if (isOwnerAcc || (acc && !acc.pending && !acc.locked)) { target = u.uid; tName = u.displayName || (acc && acc.name) || email.split('@')[0]; }
+        }
+        if (!target) return res.json({ ok: false, error: 'לא מצאתי משתמש פעיל בתכל׳ס עם המייל הזה. שלח לו קישור הזמנה במקום.' });
+      } else return res.status(400).json({ error: 'חסר משתמש' });
+      if (list.members[target]) return res.json({ ok: true, already: true, name: tName });
+      const byName = (list.members[d.uid] && list.members[d.uid].name) || displayName(d);
+      await db.ref(`todo/shared/${listId}/members/${target}`).set({ name: String(tName).slice(0, 40), at: now, by: d.uid, byName, via: 'added' });
+      await db.ref(`todo/userLists/${target}/${listId}`).set(true);
+      await logList(listId, { type: 'add', uid: target, name: tName, by: d.uid, byName });
+      await sendToUser(target, '👥 צורפת לרשימה "' + (list.name || 'רשימה משותפת') + '"', byName + ' צירף/ה אותך. אפשר לצאת מהרשימה בכל רגע.', 'list-' + listId).catch(() => 0);
+      res.json({ ok: true, name: tName });
+    } catch (err) {
+      console.error('POST /tasks/lists/add error:', err.message);
       res.status(500).json({ error: 'שגיאת שרת' });
     }
   });
