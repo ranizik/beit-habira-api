@@ -1,0 +1,21 @@
+# בדיקות אוטומטיות לשרת – בכל push. Render מעלה לאוויר רק אחרי שהבדיקות עברו (Auto-Deploy: After CI Checks Pass)
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: בדיקת תחביר לכל הקבצים
+        run: for f in *.js; do node --check "$f" || exit 1; done
+      - name: בדיקות תכל׳ס (שרת)
+        run: node --test tests/tasks-server.test.js

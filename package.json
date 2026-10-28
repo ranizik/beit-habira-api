@@ -4,7 +4,8 @@
   "description": "Beit HaBira Integration API - Firebase to Maneo POS bridge",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test tests/tasks-server.test.js"
   },
   "engines": {
     "node": ">=18.0.0"
