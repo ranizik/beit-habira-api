@@ -337,7 +337,7 @@ function register(app, admin, db, express) {
         await ref.update({ done: true, doneAt: Date.now() });
         if (task.rep) { // משימה חוזרת - יוצרים את הפעם הבאה (כמו באפליקציה)
           const nid = 'task_' + Date.now();
-          const n = { id: nid, name: task.name, pri: task.pri === 'high' ? 'high' : 'low', date: nextRepeatDate(task), time: task.time || '', done: false, created: Date.now(), rep: task.rep };
+          const n = { id: nid, name: task.name, pri: task.pri || 'low', date: nextRepeatDate(task), time: task.time || '', done: false, created: Date.now(), rep: task.rep };
           ['cat', 'notes', 'by', 'byUid', 'who'].forEach((k) => { if (task[k]) n[k] = task[k]; });
           await db.ref(`${v.path}/${nid}`).set(n);
         }
