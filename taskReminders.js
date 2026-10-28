@@ -134,6 +134,26 @@ function register(app, admin, db, express) {
     }
   });
 
+  // מחיקת משימות מרשימה משותפת דרך השרת (כל חבר ברשימה יכול למחוק)
+  app.post('/tasks/lists/remove-tasks', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      const { listId, ids } = req.body || {};
+      if (!SAFE.test(String(listId || '')) || !Array.isArray(ids) || !ids.length || ids.length > 500) return res.status(400).json({ error: 'חסרים פרטים' });
+      const member = (await db.ref(`todo/shared/${listId}/members/${d.uid}`).once('value')).val();
+      if (!member) return res.status(403).json({ error: 'לא חבר ברשימה' });
+      const upd = {};
+      ids.filter((id) => SAFE.test(String(id))).forEach((id) => { upd[id] = null; });
+      if (!Object.keys(upd).length) return res.status(400).json({ error: 'אין משימות' });
+      await db.ref(`todo/shared/${listId}/tasks`).update(upd);
+      res.json({ ok: true, removed: Object.keys(upd).length });
+    } catch (err) {
+      console.error('POST /tasks/lists/remove-tasks error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
   // ---------- פרטי רשימה: משתתפים, פעילות, יומן הצטרפות/יציאה ----------
   app.post('/tasks/lists/info', express.json(), async (req, res) => {
     try {
