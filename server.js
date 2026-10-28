@@ -914,6 +914,7 @@ require('./tasksGcal').register(app, admin, db, express);
 // ---------- נתוני שימוש לאפליקציית המשימות (ספירות בלבד, דוח לבעל העסק) ----------
 require('./tasksStats').register(app, admin, db, express);
 require('./tasksAccess').register(app, admin, db, express);
+require('./tasksHealth').register(app, admin, db, express);
 
 // ---------- Middleware אימות לכל שאר הנתיבים ----------
 app.use(requireApiKey);

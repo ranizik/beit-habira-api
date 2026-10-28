@@ -23,6 +23,9 @@ function ilTime(dateStr, timeStr) {
   return guess - (asIL - guess);
 }
 
+// מצב בריאות לבדיקה עצמית (tasksHealth.js קורא אותו)
+const health = { startedAt: Date.now(), lastTickAt: 0, lastOkAt: 0, consecutiveErr: 0, lastError: '', sendOk: 0, sendFail: 0 };
+
 function register(app, admin, db, express) {
   async function authUser(req) {
     const h = req.headers.authorization || '';
@@ -277,6 +280,8 @@ function register(app, admin, db, express) {
       if (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token') cleanup[entries[i][0]] = null;
     });
     if (Object.keys(cleanup).length) await db.ref(`todoPushTokens/${uid}`).update(cleanup);
+    health.sendOk += result.successCount;
+    health.sendFail += result.responses.filter((r) => r.error && !/not-registered|invalid-registration/.test(r.error.code || '')).length;
     return result.successCount;
   }
   module.exports.sendToUser = sendToUser; // גם למודול המנויים (tasksAccess)
@@ -405,10 +410,13 @@ function register(app, admin, db, express) {
         const members = Object.keys(l.members || {}).filter((m) => SAFE.test(m) && !blocked.has(m));
         if (members.length) await checkUser(members, `todo/shared/${listId}/tasks`, l.tasks, now, '[' + (l.name || 'משותף') + '] ', nagCfg);
       }
+      health.lastOkAt = Date.now(); health.consecutiveErr = 0;
     } catch (err) {
       console.error('task reminders tick error:', err.message);
+      health.consecutiveErr++; health.lastError = String(err.message || err).slice(0, 200);
     } finally {
       running = false;
+      health.lastTickAt = Date.now();
     }
   }
   setInterval(tick, 60 * 1000);
@@ -416,4 +424,4 @@ function register(app, admin, db, express) {
   console.log('⏰ תזכורות משימות פעילות');
 }
 
-module.exports = { register, ilTime };
+module.exports = { register, ilTime, health };
