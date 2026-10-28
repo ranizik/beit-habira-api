@@ -43,6 +43,32 @@ function register(app, admin, db, express) {
     }
   });
 
+  // כניסה לקישור (גם בלי התחברות) - כדי לדעת כמה פתחו את האפליקציה, לא רק כמה נרשמו
+  // נשמר: todoStats/visitors/<vid> = { first, last, n, platform, src }, todoStats/daily/<day>/visitors/<vid> = true
+  const visitHits = {};
+  app.post('/tasks/stats/visit', express.json(), async (req, res) => {
+    try {
+      const ip = String(req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+      const now = Date.now();
+      const hits = (visitHits[ip] || []).filter((t) => now - t < 3600000);
+      if (hits.length >= 30) return res.json({ ok: false });
+      hits.push(now); visitHits[ip] = hits;
+      const { vid, standalone, platform, src } = req.body || {};
+      if (!/^[A-Za-z0-9]{8,40}$/.test(String(vid || ''))) return res.status(400).json({ error: 'vid' });
+      const vref = db.ref(`todoStats/visitors/${vid}`);
+      const v = (await vref.once('value')).val() || {};
+      const upd = { last: now, n: (Number(v.n) || 0) + 1, platform: String(platform || '').slice(0, 20) };
+      if (!v.first) { upd.first = now; upd.src = String(src || '').slice(0, 40); }
+      if (standalone) upd.standalone = true;
+      await vref.update(upd);
+      await db.ref(`todoStats/daily/${ilDay(now)}/visitors/${vid}`).set(true);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('POST /tasks/stats/visit error:', err.message);
+      res.status(200).json({ ok: false });
+    }
+  });
+
   app.post('/tasks/stats/event', express.json(), async (req, res) => {
     try {
       const d = await authUser(req);
@@ -64,8 +90,10 @@ function register(app, admin, db, express) {
       if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
       const now = Date.now();
       const DAY = 864e5;
+      const visitorsP = db.ref('todoStats/visitors').once('value').then((x) => x.val() || {});
       const [stats, todo, push, gcal] = await Promise.all(['todoStats', 'todo', 'todoPushTokens', 'todoGcal'].map((p) => db.ref(p).once('value').then((s) => s.val() || {})));
       const sUsers = stats.users || {};
+      const visitors = await visitorsP;
       const daily = stats.daily || {};
 
       // משתמשים = מי שנכנס עם Google לאפליקציית המשימות (לא כולל כניסת המנהל)
@@ -104,6 +132,8 @@ function register(app, admin, db, express) {
           newUsers: users.filter((u) => u.first && ilDay(u.first) === key).length,
           tasks: allTasks.filter((t) => t.created && ilDay(t.created) === key).length,
           installs: Number(dd.install) || 0,
+          visitors: Object.keys(dd.visitors || {}).length,
+          newVisitors: Object.values(visitors).filter((v) => v && v.first && ilDay(v.first) === key).length,
         });
       }
       const sum = (f) => Object.values(daily).reduce((a, dd) => a + (Number(dd && dd[f]) || 0), 0);
@@ -118,6 +148,12 @@ function register(app, admin, db, express) {
           new30: users.filter((u) => u.first && now - u.first < 30 * DAY).length,
           active1: since(DAY), active7: since(7 * DAY), active30: since(30 * DAY),
         },
+        visits: (() => {
+          const vs = Object.values(visitors).filter(Boolean);
+          const uniq = (ms) => { const set = new Set(); for (let i = 0; i < ms; i++) Object.keys((daily[ilDay(now - i * DAY)] || {}).visitors || {}).forEach((x) => set.add(x)); return set.size; };
+          return { total: vs.length, today: uniq(1), d7: uniq(7), d30: uniq(30), new7: vs.filter((v) => v.first && now - v.first < 7 * DAY).length,
+            fromHome: vs.filter((v) => v.standalone).length, todayNew: vs.filter((v) => v.first && ilDay(v.first) === ilDay(now)).length };
+        })(),
         installs: {
           installed: users.filter((u) => u.s.installedAt || u.s.standalone).length,
           installEvents: sum('install'),
