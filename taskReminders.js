@@ -88,9 +88,15 @@ function register(app, admin, db, express) {
       const list = (await db.ref(`todo/shared/${listId}`).once('value')).val();
       if (!list || !list.members || !list.members[d.uid]) return res.status(403).json({ error: 'לא חבר ברשימה' });
       const who = (list.members[d.uid] && list.members[d.uid].name) || displayName(d);
+      // assignee = מי שהמשימה באחריותו (מקבל/ת התראה מיוחדת). reassign = רק שינוי אחריות - בלי "הוסיף/ה" לשאר
+      const assignee = SAFE.test(String((req.body || {}).assignee || '')) && list.members[req.body.assignee] ? req.body.assignee : '';
+      const reassign = !!(req.body || {}).reassign;
       const others = Object.keys(list.members).filter((u) => u !== d.uid && SAFE.test(u));
       let sent = 0;
-      for (const u of others) sent += await sendToUser(u, '👥 ' + (list.name || 'רשימה משותפת'), who + ' הוסיף/ה: ' + name, 'list-' + listId);
+      for (const u of others) {
+        if (u === assignee) sent += await sendToUser(u, '📌 ' + (list.name || 'רשימה משותפת') + ' – באחריותך', who + ': ' + name, 'list-' + listId);
+        else if (!reassign) sent += await sendToUser(u, '👥 ' + (list.name || 'רשימה משותפת'), who + ' הוסיף/ה: ' + name + (assignee && list.members[assignee] ? ' (באחריות ' + (list.members[assignee].name || '') + ')' : ''), 'list-' + listId);
+      }
       res.json({ ok: true, sent });
     } catch (err) {
       console.error('POST /tasks/lists/notify error:', err.message);

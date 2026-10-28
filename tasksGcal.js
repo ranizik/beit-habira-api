@@ -13,6 +13,8 @@
  *   POST /tasks/gcal/status      -> { connected, email }
  *   POST /tasks/gcal/disconnect
  *   POST /tasks/gcal/task  { op: 'create'|'update'|'delete', task: {name,date,time,done}, gtaskId } -> { ok, id }
+ *   POST /tasks/gcal/events { on, tasks? } - גם אירוע ביומן Google לכל משימה (מופיע ביומן של סמסונג). on=true בלי הרשאה -> { needConsent }
+ *     מיפוי משימה->אירוע: todoGcalEv/<uid>/<gtaskId> = eventId
  *
  * נשמר ב-Firebase (נגיש רק לשרת): todoGcal/<uid> = { refresh, email, at },  todoGcalState/<state> = { uid, exp }
  */
@@ -21,6 +23,8 @@ const crypto = require('crypto');
 const CLIENT_ID = process.env.GCAL_CLIENT_ID || '895106923239-7ctgh1gc0je4pah4egj0t8h2ajapo95c.apps.googleusercontent.com';
 const REDIRECT = (process.env.PUBLIC_API_URL || 'https://beit-habira-api.onrender.com') + '/tasks/gcal/callback';
 const SCOPES = 'https://www.googleapis.com/auth/tasks openid email';
+const CAL_SCOPE = 'https://www.googleapis.com/auth/calendar.events'; // רק למי שביקש "גם כאירוע ביומן" (כדי שיופיע ביומן של סמסונג)
+const TZ = 'Asia/Jerusalem';
 const SAFE = /^[-_A-Za-z0-9]{1,128}$/;
 const tokenCache = {}; // uid -> { token, exp }
 
@@ -72,9 +76,10 @@ function register(app, admin, db, express) {
       if (!d) return res.status(401).json({ error: 'אין הרשאה' });
       if (!configured()) return res.status(503).json({ error: 'החיבור ליומן עוד לא הוגדר בשרת' });
       const state = crypto.randomBytes(18).toString('hex');
-      await db.ref(`todoGcalState/${state}`).set({ uid: d.uid, exp: Date.now() + 10 * 60 * 1000 });
+      const wantCal = !!(req.body || {}).cal;
+      await db.ref(`todoGcalState/${state}`).set({ uid: d.uid, exp: Date.now() + 10 * 60 * 1000, cal: wantCal });
       const url = 'https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams({
-        client_id: CLIENT_ID, redirect_uri: REDIRECT, response_type: 'code', scope: SCOPES,
+        client_id: CLIENT_ID, redirect_uri: REDIRECT, response_type: 'code', scope: SCOPES + (wantCal ? ' ' + CAL_SCOPE : ''),
         access_type: 'offline', prompt: 'consent select_account', include_granted_scopes: 'true', state,
       });
       res.json({ ok: true, url });
@@ -106,7 +111,8 @@ function register(app, admin, db, express) {
       const prev = (await db.ref(`todoGcal/${st.uid}`).once('value')).val();
       const refresh = data.refresh_token || (prev && prev.email === email ? prev.refresh : null);
       if (!refresh) return page(false, 'גוגל לא נתן הרשאה קבועה - נסה שוב');
-      await db.ref(`todoGcal/${st.uid}`).set({ refresh, email, at: Date.now() });
+      const cal = (data.scope || '').includes(CAL_SCOPE) || !!(prev && prev.cal && prev.email === email && !data.refresh_token);
+      await db.ref(`todoGcal/${st.uid}`).set({ refresh, email, at: Date.now(), cal, events: !!(cal && (st.cal || (prev && prev.events && prev.email === email))) });
       tokenCache[st.uid] = { token: data.access_token, exp: Date.now() + (data.expires_in || 3600) * 1000 };
       page(true, 'היומן מחובר' + (email ? ' (' + email + ')' : ''));
     } catch (err) {
@@ -120,7 +126,7 @@ function register(app, admin, db, express) {
       const d = await authUser(req);
       if (!d) return res.status(401).json({ error: 'אין הרשאה' });
       const saved = (await db.ref(`todoGcal/${d.uid}`).once('value')).val();
-      res.json({ ok: true, configured: configured(), connected: !!(saved && saved.refresh), email: (saved && saved.email) || '' });
+      res.json({ ok: true, configured: configured(), connected: !!(saved && saved.refresh), email: (saved && saved.email) || '', cal: !!(saved && saved.cal), events: !!(saved && saved.events) });
     } catch (err) {
       res.status(500).json({ error: 'שגיאת שרת' });
     }
@@ -133,6 +139,7 @@ function register(app, admin, db, express) {
       const saved = (await db.ref(`todoGcal/${d.uid}`).once('value')).val();
       if (saved && saved.refresh) fetch('https://oauth2.googleapis.com/revoke?token=' + encodeURIComponent(saved.refresh), { method: 'POST' }).catch(() => {});
       await db.ref(`todoGcal/${d.uid}`).remove();
+      await db.ref(`todoGcalEv/${d.uid}`).remove();
       delete tokenCache[d.uid];
       res.json({ ok: true });
     } catch (err) {
@@ -157,12 +164,98 @@ function register(app, admin, db, express) {
         body: op === 'delete' ? undefined : JSON.stringify(gtaskBody(task)),
       });
       const data = r.status === 204 ? {} : await r.json().catch(() => ({}));
-      if (r.ok || (op !== 'create' && r.status === 404)) return res.json({ ok: true, id: data.id || gtaskId || null });
+      if (r.ok || (op !== 'create' && r.status === 404)) {
+        const id = data.id || gtaskId || null;
+        await mirrorEvent(d.uid, token, op, id, task).catch((e) => console.warn('gcal event mirror:', e.message));
+        return res.json({ ok: true, id });
+      }
       if (r.status === 401) { delete tokenCache[d.uid]; return res.json({ ok: false, error: 'not_connected' }); }
       if (r.status === 403 && /has not been used|disabled|SERVICE_DISABLED/i.test(JSON.stringify(data))) return res.json({ ok: false, error: 'Google Tasks API לא מופעל בפרויקט ב-Google Cloud' });
       res.json({ ok: false, error: (data.error && data.error.message) || ('שגיאה ' + r.status) });
     } catch (err) {
       console.error('POST /tasks/gcal/task error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
+  // ---------- אירוע ביומן Google (בנוסף למשימה) - כדי שיופיע גם ביומן של סמסונג ----------
+  function addMinutes(date, time, mins) {
+    const [y, mo, d] = date.split('-').map(Number); const [h, mi] = time.split(':').map(Number);
+    const t = new Date(Date.UTC(y, mo - 1, d, h, mi + mins));
+    const p = (n) => String(n).padStart(2, '0');
+    return { date: t.getUTCFullYear() + '-' + p(t.getUTCMonth() + 1) + '-' + p(t.getUTCDate()), time: p(t.getUTCHours()) + ':' + p(t.getUTCMinutes()) };
+  }
+  function eventBody(t) {
+    const timed = /^\d{2}:\d{2}$/.test(String(t.time || ''));
+    const body = {
+      summary: (t.done ? '✓ ' : '') + String(t.name || '').slice(0, 900),
+      description: (t.notes ? String(t.notes).slice(0, 2000) + '\n\n' : '') + 'נוסף מתכל׳ס – beit-habira.com/tasks',
+      transparency: 'transparent', // לא חוסם זמן ביומן
+      reminders: timed && !t.done ? { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] } : { useDefault: false, overrides: [] },
+    };
+    if (t.pri === 'high' && !t.done) body.colorId = '11';
+    else if (t.done) body.colorId = '8';
+    else body.colorId = '9';
+    if (timed) {
+      const e = addMinutes(t.date, t.time, 30);
+      body.start = { dateTime: t.date + 'T' + t.time + ':00', timeZone: TZ };
+      body.end = { dateTime: e.date + 'T' + e.time + ':00', timeZone: TZ };
+    } else {
+      const e = addMinutes(t.date, '00:00', 24 * 60);
+      body.start = { date: t.date }; body.end = { date: e.date };
+    }
+    return body;
+  }
+  const CAL_BASE = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+  async function mirrorEvent(uid, token, op, gtaskId, task) {
+    const key = String(gtaskId || '').replace(/[^-_A-Za-z0-9]/g, '').slice(0, 128);
+    if (!key) return;
+    const saved = (await db.ref(`todoGcal/${uid}`).once('value')).val() || {};
+    const mapRef = db.ref(`todoGcalEv/${uid}/${key}`);
+    const evId = (await mapRef.once('value')).val();
+    const H = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+    if (op === 'delete' || !saved.events || !saved.cal) {
+      if (evId && op === 'delete') { await fetch(CAL_BASE + '/' + evId, { method: 'DELETE', headers: H }); await mapRef.remove(); }
+      return;
+    }
+    if (!task || !/^\d{4}-\d{2}-\d{2}$/.test(String(task.date || ''))) return;
+    if (evId) {
+      const r = await fetch(CAL_BASE + '/' + evId, { method: 'PATCH', headers: H, body: JSON.stringify(eventBody(task)) });
+      if (r.ok) return;
+      if (r.status !== 404 && r.status !== 410) throw new Error('event patch ' + r.status);
+    }
+    const r = await fetch(CAL_BASE, { method: 'POST', headers: H, body: JSON.stringify(eventBody(task)) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error('event create ' + r.status + ' ' + ((j.error && j.error.message) || ''));
+    await mapRef.set(j.id);
+  }
+
+  // הפעלה/כיבוי "גם כאירוע ביומן". בהפעלה - יוצר אירועים למשימות הפתוחות שכבר ביומן; בכיבוי - מוחק את האירועים
+  app.post('/tasks/gcal/events', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      const { on, tasks } = req.body || {};
+      const saved = (await db.ref(`todoGcal/${d.uid}`).once('value')).val();
+      if (!saved || !saved.refresh) return res.json({ ok: false, error: 'not_connected' });
+      if (on && !saved.cal) return res.json({ ok: false, needConsent: true });
+      const token = await accessToken(d.uid);
+      if (!token) return res.json({ ok: false, error: 'not_connected' });
+      await db.ref(`todoGcal/${d.uid}/events`).set(!!on);
+      let n = 0;
+      if (on) {
+        for (const t of (Array.isArray(tasks) ? tasks : []).slice(0, 300)) {
+          if (!t || !t.gtaskId) continue;
+          try { await mirrorEvent(d.uid, token, 'update', t.gtaskId, t); n++; } catch (e) { console.warn('events backfill:', e.message); if (/ 403 /.test(e.message)) return res.json({ ok: false, error: /has not been used|disabled/i.test(e.message) ? 'Google Calendar API לא מופעל בפרויקט' : e.message }); }
+        }
+      } else {
+        const map = (await db.ref(`todoGcalEv/${d.uid}`).once('value')).val() || {};
+        for (const evId of Object.values(map)) { await fetch(CAL_BASE + '/' + evId, { method: 'DELETE', headers: { Authorization: 'Bearer ' + token } }).catch(() => {}); n++; }
+        await db.ref(`todoGcalEv/${d.uid}`).remove();
+      }
+      res.json({ ok: true, events: !!on, count: n });
+    } catch (err) {
+      console.error('POST /tasks/gcal/events error:', err.message);
       res.status(500).json({ error: 'שגיאת שרת' });
     }
   });
