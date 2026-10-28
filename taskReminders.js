@@ -261,14 +261,14 @@ function register(app, admin, db, express) {
     }
   });
 
-  async function sendToUser(uid, title, body, taskId) {
+  async function sendToUser(uid, title, body, taskId, extra) {
     const snap = await db.ref(`todoPushTokens/${uid}`).once('value');
     const entries = Object.entries(snap.val() || {}).filter(([, v]) => v && v.token);
     if (!entries.length) return 0;
     const result = await admin.messaging().sendEachForMulticast({
       tokens: entries.map(([, v]) => v.token),
       notification: { title, body },
-      data: { type: 'task-reminder', taskId: String(taskId), link: '/tasks/' },
+      data: { type: 'task-reminder', taskId: String(taskId), link: '/tasks/', ...(extra || {}) },
       webpush: { fcmOptions: { link: 'https://beit-habira.com/tasks/' }, headers: { Urgency: 'high', TTL: '21600' } },
     });
     const cleanup = {};
@@ -281,8 +281,71 @@ function register(app, admin, db, express) {
   }
   module.exports.sendToUser = sendToUser; // גם למודול המנויים (tasksAccess)
 
+  // ---------- נודניק: משימה עם שעה שלא בוצעה - תזכורת חוזרת כל X דקות עד שמסמנים בוצע ----------
+  // הגדרה למשתמש: todoNag/<uid> = { mode: 'all'|'urgent'|'off', every: 5|10|15|30 }  (ברירת מחדל: כל המשימות, כל 5 דקות)
+  // בהתראה: כפתורי "✅ בוצע" ו"⏰ עוד 30 דק׳" - עובדים בלי לפתוח את האפליקציה (טוקן חתום למשימה)
+  const NAG_DEFAULT = { mode: 'all', every: 5 };
+  const NAG_WINDOW_MS = 24 * 3600 * 1000, NAG_MAX = 120;
+  const crypto = require('crypto');
+  const nagSecret = crypto.createHash('sha256').update(String(process.env.FIREBASE_KEY || '') + '|tasks-nag').digest();
+  const signTask = (path, id) => { const p = Buffer.from(path + '|' + id).toString('base64url'); return p + '.' + crypto.createHmac('sha256', nagSecret).update(p).digest('base64url').slice(0, 32); };
+  const verifyTask = (tok) => { const [p, sig] = String(tok || '').split('.'); if (!p || !sig) return null; const exp = crypto.createHmac('sha256', nagSecret).update(p).digest('base64url').slice(0, 32); if (sig.length !== exp.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(exp))) return null; const [path, id] = Buffer.from(p, 'base64url').toString().split('|'); return /^todo\/(tasks|users\/[-_A-Za-z0-9]+\/tasks|shared\/[-_A-Za-z0-9]+\/tasks)$/.test(path) && SAFE.test(id) ? { path, id } : null; };
+  const ilHour = (ts) => Number(new Intl.DateTimeFormat('en-US', { timeZone: TZ, hourCycle: 'h23', hour: '2-digit' }).format(new Date(ts)));
+  const quiet = (ts) => { const h = ilHour(ts); return h >= 22 || h < 7; }; // לא מציקים בלילה
+  function nextRepeatDate(t) {
+    const today = new Date(new Date().toLocaleDateString('en-CA', { timeZone: TZ }) + 'T00:00:00Z');
+    const d = new Date((t.date || today.toISOString().slice(0, 10)) + 'T00:00:00Z');
+    const step = () => { if (t.rep === 'daily') d.setUTCDate(d.getUTCDate() + 1); else if (t.rep === 'weekly') d.setUTCDate(d.getUTCDate() + 7); else d.setUTCMonth(d.getUTCMonth() + 1); };
+    step(); let g = 0; while (d < today && g++ < 400) step();
+    return d.toISOString().slice(0, 10);
+  }
+
+  app.post('/tasks/nag/settings', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      const ref = db.ref(`todoNag/${d.uid}`);
+      const b = req.body || {};
+      if (b.mode !== undefined || b.every !== undefined) {
+        const upd = {};
+        if (['all', 'urgent', 'off'].includes(b.mode)) upd.mode = b.mode;
+        if ([5, 10, 15, 30].includes(Number(b.every))) upd.every = Number(b.every);
+        await ref.update(upd);
+      }
+      res.json({ ok: true, ...NAG_DEFAULT, ...((await ref.once('value')).val() || {}) });
+    } catch (err) {
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
+  // לחיצה על כפתור בהתראה (מה-Service Worker, בלי התחברות - הטוקן חתום למשימה אחת)
+  app.post('/tasks/nag/act', express.json(), async (req, res) => {
+    try {
+      const { t, a } = req.body || {};
+      const v = verifyTask(t);
+      if (!v || !['done', 'snooze'].includes(a)) return res.status(400).json({ error: 'לא תקין' });
+      const ref = db.ref(`${v.path}/${v.id}`);
+      const task = (await ref.once('value')).val();
+      if (!task) return res.json({ ok: true, gone: true });
+      if (a === 'snooze') { await ref.child('rem/snooze').set(Date.now() + 30 * 60000); return res.json({ ok: true }); }
+      if (!task.done) {
+        await ref.update({ done: true, doneAt: Date.now() });
+        if (task.rep) { // משימה חוזרת - יוצרים את הפעם הבאה (כמו באפליקציה)
+          const nid = 'task_' + Date.now();
+          const n = { id: nid, name: task.name, pri: task.pri === 'high' ? 'high' : 'low', date: nextRepeatDate(task), time: task.time || '', done: false, created: Date.now(), rep: task.rep };
+          ['cat', 'notes', 'by', 'byUid', 'who'].forEach((k) => { if (task[k]) n[k] = task[k]; });
+          await db.ref(`${v.path}/${nid}`).set(n);
+        }
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('POST /tasks/nag/act error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
   // uids = מי מקבל את התזכורת (משתמש אחד ברשימה פרטית, כל החברים ברשימה משותפת)
-  async function checkUser(uids, tasksPath, tasks, now, prefix) {
+  async function checkUser(uids, tasksPath, tasks, now, prefix, nagCfg) {
     if (!Array.isArray(uids)) uids = [uids];
     const send = async (title, body, id) => { for (const u of uids) await sendToUser(u, title, body, id); };
     for (const [id, t] of Object.entries(tasks || {})) {
@@ -301,9 +364,21 @@ function register(app, admin, db, express) {
         upd.eve = true;
         await send('📋 תזכורת למחר: ' + (prefix || '') + t.name, 'מחר' + (t.time ? ' בשעה ' + t.time : ''), id);
       }
+      const act = { act: signTask(tasksPath, id) };
       if (t.time && !rem.at && now >= taskAt && now - taskAt < MAX_LATE_MS) {
-        upd.at = true;
-        await send('⏰ הגיע הזמן: ' + (prefix || '') + t.name, 'עכשיו - ' + t.time, id);
+        upd.at = true; upd.atAt = now;
+        for (const u of uids) await sendToUser(u, '⏰ הגיע הזמן: ' + (prefix || '') + t.name, 'עכשיו - ' + t.time, id, act);
+      }
+      // נודניק: ברשימה משותפת - רק למי שהמשימה באחריותו; ברשימה פרטית - לבעלים
+      const nagTo = t.who && t.who.uid && uids.includes(t.who.uid) ? [t.who.uid] : (uids.length === 1 ? uids : []);
+      const cfg = { ...NAG_DEFAULT, ...((nagCfg || {})[nagTo[0]] || {}) };
+      const lastNag = rem.nagAt || rem.atAt || taskAt;
+      if (t.time && rem.at && !upd.at && nagTo.length && cfg.mode !== 'off' && (cfg.mode !== 'urgent' || t.pri === 'high')
+          && now - taskAt < NAG_WINDOW_MS && (rem.nagN || 0) < NAG_MAX && now >= (rem.snooze || 0)
+          && now - lastNag >= cfg.every * 60000 && !quiet(now)) {
+        upd.nagAt = now; upd.nagN = (rem.nagN || 0) + 1;
+        const mins = Math.round((now - taskAt) / 60000);
+        for (const u of nagTo) await sendToUser(u, '🔁 עדיין לא בוצע: ' + (prefix || '') + t.name, 'נקבע ל-' + t.time + ' (לפני ' + (mins < 60 ? mins + ' דק׳' : Math.round(mins / 60) + ' שע׳') + '). סמן ✅ בוצע כדי להפסיק', id, act);
       }
       if (Object.keys(upd).length) await db.ref(`${tasksPath}/${id}/rem`).set({ ...rem, ...upd });
     }
@@ -315,19 +390,20 @@ function register(app, admin, db, express) {
     running = true;
     try {
       const now = Date.now();
+      const nagCfg = (await db.ref('todoNag').once('value')).val() || {};
       const owner = (await db.ref('todo/tasks').once('value')).val();
-      await checkUser('staff-tasks', 'todo/tasks', owner, now);
+      await checkUser('staff-tasks', 'todo/tasks', owner, now, '', nagCfg);
       // משתמש נעול / שהתקופה שלו נגמרה - לא מקבל תזכורות
       const blocked = await require('./tasksAccess').blockedSet(db).catch(() => new Set());
       const users = (await db.ref('todo/users').once('value')).val() || {};
       for (const [uid, u] of Object.entries(users)) {
-        if (SAFE.test(uid) && u && u.tasks && !blocked.has(uid)) await checkUser(uid, `todo/users/${uid}/tasks`, u.tasks, now);
+        if (SAFE.test(uid) && u && u.tasks && !blocked.has(uid)) await checkUser(uid, `todo/users/${uid}/tasks`, u.tasks, now, '', nagCfg);
       }
       const shared = (await db.ref('todo/shared').once('value')).val() || {};
       for (const [listId, l] of Object.entries(shared)) {
         if (!SAFE.test(listId) || !l || !l.tasks) continue;
         const members = Object.keys(l.members || {}).filter((m) => SAFE.test(m) && !blocked.has(m));
-        if (members.length) await checkUser(members, `todo/shared/${listId}/tasks`, l.tasks, now, '[' + (l.name || 'משותף') + '] ');
+        if (members.length) await checkUser(members, `todo/shared/${listId}/tasks`, l.tasks, now, '[' + (l.name || 'משותף') + '] ', nagCfg);
       }
     } catch (err) {
       console.error('task reminders tick error:', err.message);
