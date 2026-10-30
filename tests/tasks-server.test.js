@@ -49,6 +49,9 @@ test('מנויים: תקופת הרצה (חינם) מול מצב בתשלום', 
   assert.ok((await mods.tasksAccess.blockedSet(db)).has('u1'));
   const m = await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'month' } });
   assert.equal(m.body.allowed, true); assert.equal(m.body.plan, 'paid');
+  const y = await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'year' } });
+  assert.equal(y.body.allowed, true); assert.equal(y.body.plan, 'year');
+  assert.ok(y.body.daysLeft >= 365 + 29, 'שנה נוספת על החודש ששולם');
 });
 
 // ---------- תזכורות + נודניק ----------
