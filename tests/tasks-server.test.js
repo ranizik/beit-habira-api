@@ -57,6 +57,11 @@ test('מנויים: תקופת הרצה (חינם) מול מצב בתשלום', 
   const x = await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'extend', days: 90 } });
   assert.equal(x.body.daysLeft, 100, 'הארכה מוסיפה לתאריך הקיים');
   assert.equal((await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'until', until: Date.now() - 1 } })).status, 400);
+  await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'kind', kind: 'business' } });
+  assert.equal((await call('POST', '/tasks/access/list', { token: 'r' })).body.users.find((u) => u.uid === 'u1').kind, 'business', 'לקוח עסקי');
+  assert.equal((await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'kind', kind: 'x' } })).status, 400);
+  const t = await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'approve', days: 30 } });
+  assert.equal(t.body.daysLeft, 30, 'ניסיון חודש'); assert.equal(t.body.plan, 'trial');
 });
 
 // ---------- תזכורות + נודניק ----------

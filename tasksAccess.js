@@ -2,10 +2,10 @@
  * מנויים / נעילת משתמשים באפליקציית המשימות (תכל׳ס)
  *   POST /tasks/access/me                      - כל משתמש: האם מותר לו להשתמש (משתמש חדש מקבל תקופת ניסיון)
  *   POST /tasks/access/list                    - בעל העסק: כל המשתמשים + מצב המנוי
- *   POST /tasks/access/set   { uid, action }   - בעל העסק: lock | approve | year | extend{days} | until{until} | month | forever | trial7
+ *   POST /tasks/access/set   { uid, action }   - בעל העסק: lock | approve{days?} | kind{kind} | year | extend{days} | until{until} | month | forever | trial7
  *   POST /tasks/access/config { trialDays, price, contact } - בעל העסק: הגדרות
  * נשמר ב-Firebase (נגיש רק לשרת):
- *   todoAccess/users/<uid> = { name, email, start, until, locked, plan: trial|paid|year|free, warned, ended }
+ *   todoAccess/users/<uid> = { name, email, kind: business|private, start, until, locked, plan: trial|paid|year|free, warned, ended }
  *   todoAccess/config      = { trialDays, price, contact }
  * תזכורות (בדיקה כל 10 דקות):
  *   יום לפני סוף התקופה  -> הודעה לבעל העסק + למשתמש
@@ -16,7 +16,7 @@ const OWNER = 'staff-tasks';
 const OWNER_EMAILS = ['ranizik@gmail.com']; // החשבון של בעל העסק ב-Google - אף פעם לא ננעל
 const DAY = 864e5;
 // freeMode = תקופת הרצה: כל מי שאושר משתמש בחינם בלי הגבלת זמן (אין נעילה אוטומטית ואין תזכורות סוף תקופה)
-const DEF_CONFIG = { trialDays: 14, price: 20, contact: '0559800017', approval: true, freeMode: true };
+const DEF_CONFIG = { trialDays: 30, price: 20, contact: '0559800017', approval: true, freeMode: true };
 // משתמשים שנרשמו לפני שהופעל 'אישור ידני' - מקבלים ניסיון רגיל ולא נחסמים
 const APPROVAL_SINCE = Date.parse('2026-10-27T16:30:00Z');
 
@@ -95,7 +95,7 @@ function register(app, admin, db, express) {
         const a = acc[uid] || await ensure(uid, info, info.created || 0);
         const tasks = Object.values(((todo.users || {})[uid] || {}).tasks || {}).filter(Boolean);
         users.push({
-          uid, name: a.name || info.name || '', email: a.email || info.email || '',
+          uid, name: a.name || info.name || '', email: a.email || info.email || '', kind: a.kind || '',
           joined: info.created || a.start || null, last: (stats[uid] || {}).last || null,
           tasks: tasks.length, open: tasks.filter((t) => !t.done).length,
           ...pub(a, cfg, now),
@@ -114,7 +114,7 @@ function register(app, admin, db, express) {
     try {
       const d = await authUser(req);
       if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
-      const { uid, action, days, until } = req.body || {};
+      const { uid, action, days, until, kind } = req.body || {};
       if (!SAFE.test(String(uid || '')) || uid === OWNER) return res.status(400).json({ error: 'משתמש לא תקף' });
       const a = await ensure(uid, {}, 0);
       const now = Date.now();
@@ -122,7 +122,16 @@ function register(app, admin, db, express) {
       let upd;
       const cfg = await getConfig();
       if (action === 'lock') upd = { locked: true, pending: null };
-      else if (action === 'approve') upd = { locked: false, pending: null, plan: 'trial', start: now, until: now + cfg.trialDays * DAY, warned: null, ended: null };
+      else if (action === 'kind') {
+        if (!['business', 'private', ''].includes(String(kind || ''))) return res.status(400).json({ error: 'סוג לקוח לא תקף' });
+        await db.ref(`todoAccess/users/${uid}/kind`).set(kind || null);
+        return res.json({ ok: true, kind: kind || '' });
+      }
+      else if (action === 'approve') {
+        const n = days == null ? cfg.trialDays : Math.round(Number(days));
+        if (!(n >= 1 && n <= 365)) return res.status(400).json({ error: 'מספר ימים לא תקף' });
+        upd = { locked: false, pending: null, plan: 'trial', start: now, until: now + n * DAY, warned: null, ended: null };
+      }
       else if (action === 'year') upd = { locked: false, pending: null, plan: 'year', start: a.start || now, until: (a.pending ? now : base) + 365 * DAY, warned: null, ended: null };
       else if (action === 'extend') {
         const n = Math.round(Number(days));
