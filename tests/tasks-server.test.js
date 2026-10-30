@@ -62,6 +62,10 @@ test('מנויים: תקופת הרצה (חינם) מול מצב בתשלום', 
   assert.equal((await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'kind', kind: 'x' } })).status, 400);
   const t = await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'approve', days: 30 } });
   assert.equal(t.body.daysLeft, 30, 'ניסיון חודש'); assert.equal(t.body.plan, 'trial');
+  await call('POST', '/tasks/access/config', { token: 'r', body: { price: 15, priceBusiness: 45 } });
+  assert.equal((await call('POST', '/tasks/access/me', { token: 'u' })).body.price, 45, 'מחיר עסקי');
+  await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'kind', kind: 'private' } });
+  assert.equal((await call('POST', '/tasks/access/me', { token: 'u' })).body.price, 15, 'מחיר פרטי');
 });
 
 // ---------- תזכורות + נודניק ----------

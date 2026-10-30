@@ -3,7 +3,7 @@
  *   POST /tasks/access/me                      - כל משתמש: האם מותר לו להשתמש (משתמש חדש מקבל תקופת ניסיון)
  *   POST /tasks/access/list                    - בעל העסק: כל המשתמשים + מצב המנוי
  *   POST /tasks/access/set   { uid, action }   - בעל העסק: lock | approve{days?} | kind{kind} | year | extend{days} | until{until} | month | forever | trial7
- *   POST /tasks/access/config { trialDays, price, contact } - בעל העסק: הגדרות
+ *   POST /tasks/access/config { trialDays, price, priceBusiness, contact } - בעל העסק: הגדרות
  * נשמר ב-Firebase (נגיש רק לשרת):
  *   todoAccess/users/<uid> = { name, email, kind: business|private, start, until, locked, plan: trial|paid|year|free, warned, ended }
  *   todoAccess/config      = { trialDays, price, contact }
@@ -16,7 +16,7 @@ const OWNER = 'staff-tasks';
 const OWNER_EMAILS = ['ranizik@gmail.com']; // החשבון של בעל העסק ב-Google - אף פעם לא ננעל
 const DAY = 864e5;
 // freeMode = תקופת הרצה: כל מי שאושר משתמש בחינם בלי הגבלת זמן (אין נעילה אוטומטית ואין תזכורות סוף תקופה)
-const DEF_CONFIG = { trialDays: 30, price: 20, contact: '0559800017', approval: true, freeMode: true };
+const DEF_CONFIG = { trialDays: 30, price: 20, priceBusiness: 40, contact: '0559800017', approval: true, freeMode: true };
 // משתמשים שנרשמו לפני שהופעל 'אישור ידני' - מקבלים ניסיון רגיל ולא נחסמים
 const APPROVAL_SINCE = Date.parse('2026-10-27T16:30:00Z');
 
@@ -36,7 +36,7 @@ function register(app, admin, db, express) {
     allowed: allowedNow(a, now, cfg), freeMode: !!cfg.freeMode,
     locked: !!a.locked, pending: !!a.pending, plan: a.plan || 'trial', until: a.until == null ? null : a.until,
     daysLeft: (a.until == null || cfg.freeMode) ? null : Math.max(0, Math.ceil((a.until - now) / DAY)),
-    price: cfg.price, contact: cfg.contact,
+    price: a.kind === 'business' ? (cfg.priceBusiness ?? cfg.price) : cfg.price, contact: cfg.contact,
   });
   async function ensure(uid, info, created) {
     const ref = db.ref(`todoAccess/users/${uid}`);
@@ -164,6 +164,8 @@ function register(app, admin, db, express) {
       const upd = {};
       if (b.trialDays != null) { const v = Math.round(Number(b.trialDays)); if (v >= 1 && v <= 365) upd.trialDays = v; }
       if (b.price != null) { const v = Number(b.price); if (v >= 0 && v <= 10000) upd.price = v; }
+
+      if (b.priceBusiness != null) { const v = Number(b.priceBusiness); if (v >= 0 && v <= 10000) upd.priceBusiness = v; }
       if (b.approval != null) upd.approval = !!b.approval;
       if (b.freeMode != null) upd.freeMode = !!b.freeMode;
       if (b.contact != null) { const v = String(b.contact).replace(/[^0-9+]/g, '').slice(0, 15); if (v.length >= 9) upd.contact = v; }
