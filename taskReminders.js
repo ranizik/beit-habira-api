@@ -71,6 +71,13 @@ function register(app, admin, db, express) {
       if (!list || !list.invite || String(invite) !== String(list.invite)) return res.status(404).json({ error: 'הקישור לא תקף או שהרשימה נמחקה' });
       const already = !!(list.members && list.members[d.uid]);
       if (!already) {
+        // מכסת משתתפים לפי המסלול של בעל הרשימה (מי שכבר ברשימה נשאר)
+        const limit = await require('./tasksAccess').memberLimit(db, list.owner).catch(() => Infinity);
+        const count = Object.keys(list.members || {}).length;
+        if (count >= limit) {
+          if (list.owner && list.owner !== d.uid) await sendToUser(list.owner, '👥 ' + (list.name || 'רשימה משותפת') + ' – הרשימה מלאה', displayName(d) + ' ניסה/תה להצטרף, אבל הגעת ל-' + limit + ' משתתפים. אפשר להוסיף מקומות – פנה/י לרני', 'list-' + listId).catch(() => 0);
+          return res.status(403).json({ error: 'הרשימה מלאה (' + limit + ' משתתפים). בעל/ת הרשימה יכול/ה להוסיף מקומות.', full: true });
+        }
         await db.ref(`todo/shared/${listId}/members/${d.uid}`).set({ name: displayName(d), at: Date.now(), via: 'link' });
         await logList(listId, { type: 'join', uid: d.uid, name: displayName(d) });
         if (list.owner && list.owner !== d.uid) await sendToUser(list.owner, '👥 ' + (list.name || 'רשימה משותפת'), displayName(d) + ' הצטרף/ה לרשימה', 'list-' + listId).catch(() => 0);
@@ -236,6 +243,8 @@ function register(app, admin, db, express) {
         if (!target) return res.json({ ok: false, error: 'לא מצאתי משתמש פעיל בתכל׳ס עם המייל הזה. שלח לו קישור הזמנה במקום.' });
       } else return res.status(400).json({ error: 'חסר משתמש' });
       if (list.members[target]) return res.json({ ok: true, already: true, name: tName });
+      const limit = await require('./tasksAccess').memberLimit(db, list.owner).catch(() => Infinity);
+      if (Object.keys(list.members).length >= limit) return res.json({ ok: false, full: true, error: 'הרשימה מלאה (' + limit + ' משתתפים). כדי להוסיף מקומות – פנה/י לרני.' });
       const byName = (list.members[d.uid] && list.members[d.uid].name) || displayName(d);
       await db.ref(`todo/shared/${listId}/members/${target}`).set({ name: String(tName).slice(0, 40), at: now, by: d.uid, byName, via: 'added' });
       await db.ref(`todo/userLists/${target}/${listId}`).set(true);

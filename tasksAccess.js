@@ -2,11 +2,11 @@
  * מנויים / נעילת משתמשים באפליקציית המשימות (תכל׳ס)
  *   POST /tasks/access/me                      - כל משתמש: האם מותר לו להשתמש (משתמש חדש מקבל תקופת ניסיון)
  *   POST /tasks/access/list                    - בעל העסק: כל המשתמשים + מצב המנוי
- *   POST /tasks/access/set   { uid, action }   - בעל העסק: lock | approve{days?} | kind{kind} | year | extend{days} | until{until} | month | forever | trial7
+ *   POST /tasks/access/set   { uid, action }   - בעל העסק: lock | approve{days?} | kind{kind} | price{price|null} | extra{extra} | year | extend{days} | until{until} | month | forever | trial7
  *   POST /tasks/access/config { trialDays, price, priceBusiness, contact } - בעל העסק: הגדרות
  * נשמר ב-Firebase (נגיש רק לשרת):
- *   todoAccess/users/<uid> = { name, email, kind: business|private, start, until, locked, plan: trial|paid|year|free, warned, ended }
- *   todoAccess/config      = { trialDays, price, contact }
+ *   todoAccess/users/<uid> = { name, email, kind: business|private, customPrice, extraMembers, start, until, locked, plan: trial|paid|year|free, warned, ended }
+ *   todoAccess/config      = { trialDays, price, priceBusiness, membersPrivate, membersBusiness, extraPricePrivate, extraPriceBusiness, contact }
  * תזכורות (בדיקה כל 10 דקות):
  *   יום לפני סוף התקופה  -> הודעה לבעל העסק + למשתמש
  *   כשהתקופה נגמרת       -> הודעה לבעל העסק ("ננעל/ה - לחדש?")
@@ -16,9 +16,21 @@ const OWNER = 'staff-tasks';
 const OWNER_EMAILS = ['ranizik@gmail.com']; // החשבון של בעל העסק ב-Google - אף פעם לא ננעל
 const DAY = 864e5;
 // freeMode = תקופת הרצה: כל מי שאושר משתמש בחינם בלי הגבלת זמן (אין נעילה אוטומטית ואין תזכורות סוף תקופה)
-const DEF_CONFIG = { trialDays: 30, price: 20, priceBusiness: 40, contact: '0559800017', approval: true, freeMode: true };
+// מסלולים: פרטי / עסקי - מחיר חודשי, כמה משתתפים ברשימה משותפת כלולים, ומחיר לכל משתתף נוסף
+const DEF_CONFIG = { trialDays: 30, price: 20, priceBusiness: 40, membersPrivate: 5, membersBusiness: 12, extraPricePrivate: 5, extraPriceBusiness: 5, contact: '0559800017', approval: true, freeMode: true };
 // משתמשים שנרשמו לפני שהופעל 'אישור ידני' - מקבלים ניסיון רגיל ולא נחסמים
 const APPROVAL_SINCE = Date.parse('2026-10-27T16:30:00Z');
+
+// מחיר ומכסת משתתפים של לקוח לפי המסלול שלו (פרטי כברירת מחדל), תוספת משתתפים ומחיר קבוע אם נקבע
+function planOf(a, cfg) {
+  const biz = a && a.kind === 'business';
+  const extra = Math.max(0, Math.round(Number(a && a.extraMembers) || 0));
+  const base = Number(biz ? (cfg.priceBusiness ?? cfg.price) : cfg.price) || 0;
+  const extraPrice = Number(biz ? cfg.extraPriceBusiness : cfg.extraPricePrivate) || 0;
+  const auto = base + extra * extraPrice;
+  const custom = a && a.customPrice != null && a.customPrice !== '' ? Number(a.customPrice) : null;
+  return { limit: (Number(biz ? cfg.membersBusiness : cfg.membersPrivate) || 0) + extra, extraMembers: extra, autoPrice: auto, customPrice: custom, price: custom != null ? custom : auto };
+}
 
 function register(app, admin, db, express) {
   async function authUser(req) {
@@ -36,7 +48,7 @@ function register(app, admin, db, express) {
     allowed: allowedNow(a, now, cfg), freeMode: !!cfg.freeMode,
     locked: !!a.locked, pending: !!a.pending, plan: a.plan || 'trial', until: a.until == null ? null : a.until,
     daysLeft: (a.until == null || cfg.freeMode) ? null : Math.max(0, Math.ceil((a.until - now) / DAY)),
-    price: a.kind === 'business' ? (cfg.priceBusiness ?? cfg.price) : cfg.price, contact: cfg.contact,
+    kind: a.kind || '', ...planOf(a, cfg), contact: cfg.contact,
   });
   async function ensure(uid, info, created) {
     const ref = db.ref(`todoAccess/users/${uid}`);
@@ -94,10 +106,12 @@ function register(app, admin, db, express) {
         if (OWNER_EMAILS.includes(String(info.email || '').toLowerCase())) continue;
         const a = acc[uid] || await ensure(uid, info, info.created || 0);
         const tasks = Object.values(((todo.users || {})[uid] || {}).tasks || {}).filter(Boolean);
+        const ownLists = Object.values(todo.shared || {}).filter((l) => l && l.owner === uid);
+        const maxMembers = ownLists.reduce((m, l) => Math.max(m, Object.keys(l.members || {}).length), 0);
         users.push({
           uid, name: a.name || info.name || '', email: a.email || info.email || '', kind: a.kind || '',
           joined: info.created || a.start || null, last: (stats[uid] || {}).last || null,
-          tasks: tasks.length, open: tasks.filter((t) => !t.done).length,
+          tasks: tasks.length, open: tasks.filter((t) => !t.done).length, lists: ownLists.length, maxMembers,
           ...pub(a, cfg, now),
         });
       }
@@ -114,7 +128,7 @@ function register(app, admin, db, express) {
     try {
       const d = await authUser(req);
       if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
-      const { uid, action, days, until, kind } = req.body || {};
+      const { uid, action, days, until, kind, price, extra } = req.body || {};
       if (!SAFE.test(String(uid || '')) || uid === OWNER) return res.status(400).json({ error: 'משתמש לא תקף' });
       const a = await ensure(uid, {}, 0);
       const now = Date.now();
@@ -126,6 +140,18 @@ function register(app, admin, db, express) {
         if (!['business', 'private', ''].includes(String(kind || ''))) return res.status(400).json({ error: 'סוג לקוח לא תקף' });
         await db.ref(`todoAccess/users/${uid}/kind`).set(kind || null);
         return res.json({ ok: true, kind: kind || '' });
+      }
+      else if (action === 'price') {
+        const v = price == null || price === '' ? null : Number(price);
+        if (v != null && !(v >= 0 && v <= 100000)) return res.status(400).json({ error: 'מחיר לא תקף' });
+        await db.ref(`todoAccess/users/${uid}/customPrice`).set(v);
+        return res.json({ ok: true, ...pub({ ...a, customPrice: v }, cfg, now) });
+      }
+      else if (action === 'extra') {
+        const v = Math.round(Number(extra));
+        if (!(v >= 0 && v <= 500)) return res.status(400).json({ error: 'מספר לא תקף' });
+        await db.ref(`todoAccess/users/${uid}/extraMembers`).set(v || null);
+        return res.json({ ok: true, ...pub({ ...a, extraMembers: v }, cfg, now) });
       }
       else if (action === 'approve') {
         const n = days == null ? cfg.trialDays : Math.round(Number(days));
@@ -166,6 +192,7 @@ function register(app, admin, db, express) {
       if (b.price != null) { const v = Number(b.price); if (v >= 0 && v <= 10000) upd.price = v; }
 
       if (b.priceBusiness != null) { const v = Number(b.priceBusiness); if (v >= 0 && v <= 10000) upd.priceBusiness = v; }
+      for (const k of ['membersPrivate', 'membersBusiness', 'extraPricePrivate', 'extraPriceBusiness']) if (b[k] != null && b[k] !== '') { const v = Math.round(Number(b[k])); if (v >= 0 && v <= 10000) upd[k] = v; }
       if (b.approval != null) upd.approval = !!b.approval;
       if (b.freeMode != null) upd.freeMode = !!b.freeMode;
       if (b.contact != null) { const v = String(b.contact).replace(/[^0-9+]/g, '').slice(0, 15); if (v.length >= 9) upd.contact = v; }
@@ -220,4 +247,13 @@ async function blockedSet(db) {
   return new Set(Object.entries(acc).filter(([, a]) => a && (a.pending || a.locked || (!free && a.until != null && a.until <= now))).map(([u]) => u));
 }
 
-module.exports = { register, blockedSet, OWNER_EMAILS };
+// לשימוש של מודול הרשימות: כמה משתתפים מותר ברשימה שבעליה uid (בעל העסק - ללא הגבלה)
+async function memberLimit(db, uid) {
+  if (!uid || uid === OWNER) return Infinity;
+  const a = (await db.ref(`todoAccess/users/${uid}`).once('value')).val();
+  if (a && OWNER_EMAILS.includes(String(a.email || '').toLowerCase())) return Infinity;
+  const cfg = { ...DEF_CONFIG, ...((await db.ref('todoAccess/config').once('value')).val() || {}) };
+  return planOf(a || {}, cfg).limit;
+}
+
+module.exports = { register, blockedSet, memberLimit, OWNER_EMAILS };

@@ -228,3 +228,28 @@ test('יומן: משימה → Google Tasks + אירוע ביומן (עדכון 
     assert.equal((db.store.todoGcalEv.u1 || {}).gt1, undefined);
   } finally { global.fetch = realFetch; }
 });
+
+// ---------- מסלולים: מחיר ומכסת משתתפים ----------
+test('מסלולים: מחיר לפי פרטי/עסקי, משתתפים נוספים, מחיר קבוע, ורשימה מלאה', async () => {
+  const db = fakeDb({ todoAccess: { config: { freeMode: true, price: 20, priceBusiness: 50, membersPrivate: 2, membersBusiness: 3, extraPricePrivate: 4, extraPriceBusiness: 6 },
+    users: { u1: { name: 'א', plan: 'free', until: null }, u2: { name: 'ב', plan: 'free', until: null }, u3: { name: 'ג', plan: 'free', until: null }, u4: { name: 'ד', plan: 'free', until: null } } } });
+  const admin = fakeAdmin({});
+  admin.tokens.r = OWNER; ['u1', 'u2', 'u3', 'u4'].forEach((u) => { admin.tokens[u] = { uid: u, name: u }; });
+  const { call } = load(['taskReminders', 'tasksAccess'], db, admin);
+  let me = (await call('POST', '/tasks/access/me', { token: 'u1' })).body;
+  assert.equal(me.price, 20); assert.equal(me.limit, 2, 'פרטי כברירת מחדל');
+  await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'kind', kind: 'business' } });
+  const x = await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'extra', extra: 2 } });
+  assert.equal(x.body.limit, 5); assert.equal(x.body.price, 50 + 2 * 6, 'עסקי + 2 משתתפים');
+  const p = await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'price', price: 99 } });
+  assert.equal(p.body.price, 99); assert.equal(p.body.autoPrice, 62, 'מחיר קבוע גובר על האוטומטי');
+  assert.equal((await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'price', price: null } })).body.price, 62, 'חזרה לאוטומטי');
+  // רשימה של לקוח פרטי עם מכסה 2: בעלים + משתתף אחד, השלישי נדחה
+  const c = (await call('POST', '/tasks/lists/create', { token: 'u2', body: { name: 'בית' } })).body;
+  assert.equal((await call('POST', '/tasks/lists/join', { token: 'u3', body: { listId: c.listId, invite: c.invite } })).body.ok, true);
+  const full = await call('POST', '/tasks/lists/join', { token: 'u4', body: { listId: c.listId, invite: c.invite } });
+  assert.equal(full.status, 403); assert.equal(full.body.full, true);
+  assert.equal((await call('POST', '/tasks/lists/join', { token: 'u3', body: { listId: c.listId, invite: c.invite } })).body.ok, true, 'מי שכבר ברשימה נשאר');
+  await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u2', action: 'extra', extra: 1 } });
+  assert.equal((await call('POST', '/tasks/lists/join', { token: 'u4', body: { listId: c.listId, invite: c.invite } })).body.ok, true, 'אחרי תוספת מקום');
+});
