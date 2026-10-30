@@ -52,6 +52,11 @@ test('מנויים: תקופת הרצה (חינם) מול מצב בתשלום', 
   const y = await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'year' } });
   assert.equal(y.body.allowed, true); assert.equal(y.body.plan, 'year');
   assert.ok(y.body.daysLeft >= 365 + 29, 'שנה נוספת על החודש ששולם');
+  const e = await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'until', until: Date.now() + 10 * 864e5 } });
+  assert.equal(e.body.daysLeft, 10, 'תאריך סיום מדויק');
+  const x = await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'extend', days: 90 } });
+  assert.equal(x.body.daysLeft, 100, 'הארכה מוסיפה לתאריך הקיים');
+  assert.equal((await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'until', until: Date.now() - 1 } })).status, 400);
 });
 
 // ---------- תזכורות + נודניק ----------

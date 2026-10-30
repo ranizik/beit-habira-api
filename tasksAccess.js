@@ -2,7 +2,7 @@
  * מנויים / נעילת משתמשים באפליקציית המשימות (תכל׳ס)
  *   POST /tasks/access/me                      - כל משתמש: האם מותר לו להשתמש (משתמש חדש מקבל תקופת ניסיון)
  *   POST /tasks/access/list                    - בעל העסק: כל המשתמשים + מצב המנוי
- *   POST /tasks/access/set   { uid, action }   - בעל העסק: lock | approve | year | month | forever | trial7
+ *   POST /tasks/access/set   { uid, action }   - בעל העסק: lock | approve | year | extend{days} | until{until} | month | forever | trial7
  *   POST /tasks/access/config { trialDays, price, contact } - בעל העסק: הגדרות
  * נשמר ב-Firebase (נגיש רק לשרת):
  *   todoAccess/users/<uid> = { name, email, start, until, locked, plan: trial|paid|year|free, warned, ended }
@@ -114,7 +114,7 @@ function register(app, admin, db, express) {
     try {
       const d = await authUser(req);
       if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
-      const { uid, action } = req.body || {};
+      const { uid, action, days, until } = req.body || {};
       if (!SAFE.test(String(uid || '')) || uid === OWNER) return res.status(400).json({ error: 'משתמש לא תקף' });
       const a = await ensure(uid, {}, 0);
       const now = Date.now();
@@ -124,6 +124,15 @@ function register(app, admin, db, express) {
       if (action === 'lock') upd = { locked: true, pending: null };
       else if (action === 'approve') upd = { locked: false, pending: null, plan: 'trial', start: now, until: now + cfg.trialDays * DAY, warned: null, ended: null };
       else if (action === 'year') upd = { locked: false, pending: null, plan: 'year', start: a.start || now, until: (a.pending ? now : base) + 365 * DAY, warned: null, ended: null };
+      else if (action === 'extend') {
+        const n = Math.round(Number(days));
+        if (!(n >= 1 && n <= 3650)) return res.status(400).json({ error: 'מספר ימים לא תקף' });
+        upd = { locked: false, pending: null, plan: 'year', start: a.start || now, until: (a.pending ? now : base) + n * DAY, warned: null, ended: null };
+      } else if (action === 'until') {
+        const t = Number(until);
+        if (!(t > now && t < now + 3650 * DAY)) return res.status(400).json({ error: 'תאריך לא תקף' });
+        upd = { locked: false, pending: null, plan: 'year', start: a.start || now, until: t, warned: null, ended: null };
+      }
       else if (action === 'month') upd = { locked: false, pending: null, plan: 'paid', until: base + 30 * DAY, warned: null, ended: null, paidAt: now };
       else if (action === 'forever') upd = { locked: false, pending: null, plan: 'free', until: null, warned: null, ended: null };
       else if (action === 'trial7') upd = { locked: false, pending: null, until: base + 7 * DAY, warned: null, ended: null };
