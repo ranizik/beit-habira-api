@@ -915,6 +915,8 @@ require('./tasksGcal').register(app, admin, db, express);
 require('./tasksStats').register(app, admin, db, express);
 require('./tasksAccess').register(app, admin, db, express);
 require('./tasksHealth').register(app, admin, db, express);
+// גיבוי לילי של נתוני תכל׳ס (30 יום אחורה)
+require('./tasksBackup').register(app, admin, db, express);
 
 // ---------- Middleware אימות לכל שאר הנתיבים ----------
 app.use(requireApiKey);

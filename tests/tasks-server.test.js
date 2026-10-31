@@ -295,3 +295,21 @@ test('מסלולים: מחיר לפי פרטי/עסקי, משתתפים נוספ
   await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u2', action: 'extra', extra: 1 } });
   assert.equal((await call('POST', '/tasks/lists/join', { token: 'u4', body: { listId: c.listId, invite: c.invite } })).body.ok, true, 'אחרי תוספת מקום');
 });
+
+// ---------- גיבוי ----------
+test('גיבוי: נשמר דחוס, אפשר להוריד, רק 30 אחרונים, רק למנהל, בלי הרשאות יומן', async () => {
+  const old = {}; for (let i = 0; i < 31; i++) old[`2026-01-${String(i + 1).padStart(2, '0')}`] = { at: 1, gz: 'x' };
+  const db = fakeDb({ todo: { users: { a: { tasks: { t1: { name: 'לקנות חלב' } } } }, shared: { L: { tasks: { s1: { name: 'x' } } } } },
+    todoGcal: { a: { refresh: 'SECRET' } }, todoBackup: old });
+  const admin = fakeAdmin({}); admin.tokens.r = OWNER; admin.tokens.u = { uid: 'a' };
+  const { call } = load(['tasksBackup'], db, admin);
+  assert.equal((await call('POST', '/tasks/backup/now', { token: 'u' })).status, 401);
+  const r = (await call('POST', '/tasks/backup/now', { token: 'r' })).body;
+  assert.equal(r.ok, true); assert.equal(r.counts.tasks, 2);
+  const list = (await call('POST', '/tasks/backup/list', { token: 'r' })).body;
+  assert.equal(list.backups.length, 30); assert.equal(list.backups[0].day, r.day);
+  const g = (await call('POST', '/tasks/backup/get', { token: 'r', body: { day: r.day } })).body;
+  assert.equal(g.data.todo.users.a.tasks.t1.name, 'לקנות חלב');
+  assert.equal(g.data.todoGcal, undefined, 'הרשאות יומן לא נשמרות בגיבוי');
+  assert.equal((await call('POST', '/tasks/backup/get', { token: 'r', body: { day: '../x' } })).status, 400);
+});

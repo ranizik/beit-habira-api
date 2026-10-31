@@ -1,6 +1,6 @@
 # תכל׳ס (אפליקציית המשימות) – מודולי השרת בריפו הזה
 
-הקבצים `taskReminders.js`, `tasksGcal.js`, `tasksStats.js`, `tasksAccess.js`, `tasksHealth.js` שייכים לאפליקציית המשימות **תכל׳ס** (beit-habira.com/tasks).
+הקבצים `taskReminders.js`, `tasksGcal.js`, `tasksStats.js`, `tasksAccess.js`, `tasksHealth.js`, `tasksBackup.js` (גיבוי לילי ב-03:00 ל-todoBackup, 30 יום) שייכים לאפליקציית המשימות **תכל׳ס** (beit-habira.com/tasks).
 
 📘 המסמך הטכני המלא (ארכיטקטורה, נתונים, נתיבים, העלאה, בדיקות, תקלות):
 https://github.com/ranizik/beit-habira-push/blob/main/TECHNICAL.md
