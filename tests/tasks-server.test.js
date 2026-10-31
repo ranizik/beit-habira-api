@@ -210,6 +210,24 @@ test('נתונים: מי נכנס ומתי, ומחיקת היסטוריה (למ�
   assert.equal(s.visits.total, 0);
 });
 
+test('נתונים: משימות לכל משתמש ביום, אחוז שימוש ומדדי תלות', async () => {
+  const now = Date.now();
+  const db = fakeDb({ todo: { users: { a: { tasks: { t1: { name: 'x', created: now - 864e5 } } } } } });
+  const admin = fakeAdmin({ a: { name: 'דני' }, b: { name: 'יוסי' } });
+  admin.tokens.r = OWNER; admin.tokens.a = { uid: 'a' }; admin.tokens.b = { uid: 'b' };
+  const { call } = load(['taskReminders', 'tasksAccess', 'tasksStats'], db, admin);
+  await call('POST', '/tasks/stats/ping', { token: 'a', body: {} });
+  for (let i = 0; i < 3; i++) await call('POST', '/tasks/stats/event', { token: 'a', body: { type: 'task_voice' } });
+  await call('POST', '/tasks/stats/ping', { token: 'b', body: {} });
+  await call('POST', '/tasks/stats/event', { token: 'b', body: { type: 'task_typed' } });
+  const s = (await call('POST', '/tasks/stats/summary', { token: 'r' })).body;
+  const a = s.perUser.find((u) => u.uid === 'a'), b = s.perUser.find((u) => u.uid === 'b');
+  assert.equal(a.today, 3); assert.equal(a.tasks[12], 1, 'משימה קיימת מאתמול נספרת'); assert.equal(a.d7, 4); assert.equal(a.activeDays, 2);
+  assert.equal(b.today, 1); assert.equal(s.perUser[0].uid, 'a', 'ממוין לפי כמות משימות');
+  assert.equal(s.pct.length, 30); assert.ok(s.pct[29].pct >= 0 && s.pct[29].pct <= 100);
+  assert.equal(s.dependence.users, 2); assert.ok(s.dependence.tasksPerActiveDay > 0);
+});
+
 test('בריאות: /tasks/health ובדיקה עצמית עם התראה לבעלים', async () => {
   const db = fakeDb({ todoPushTokens: { 'staff-tasks': { d: { token: 'T' } } } });
   const admin = fakeAdmin({});

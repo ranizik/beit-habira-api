@@ -6,7 +6,7 @@
  *   POST /tasks/stats/clear   { uid? }                       - רק לבעל העסק: מחיקת היסטוריית השימוש (של משתמש אחד או של כולם)
  * נשמר ב-Firebase (נגיש רק לשרת):
  *   todoStats/users/<uid>  = { first, last, opens, standalone, platform, installedAt }
- *   todoStats/daily/<YYYY-MM-DD> = { active: {uid:ts}, opens, install, task_voice, task_typed }
+ *   todoStats/daily/<YYYY-MM-DD> = { active: {uid:ts}, tasksBy: {uid:n}, opens, install, task_voice, task_typed }
  * נתונים מלפני ההפעלה נלקחים מהמידע הקיים: תאריך הרשמה מ-Firebase Auth, ומשימות לפי שדה created.
  */
 const SAFE = /^[-_A-Za-z0-9]{1,128}$/;
@@ -77,6 +77,7 @@ function register(app, admin, db, express) {
       const type = String((req.body || {}).type || '');
       if (!EVENTS.includes(type)) return res.status(400).json({ error: 'סוג לא תקף' });
       await inc(db.ref(`todoStats/daily/${ilDay(Date.now())}/${type}`));
+      if (type !== 'install') await inc(db.ref(`todoStats/daily/${ilDay(Date.now())}/tasksBy/${d.uid}`)); // כמה משימות כל משתמש הוסיף ביום (כולל כאלה שנמחקו אח"כ)
       if (type === 'install') await db.ref(`todoStats/users/${d.uid}/installedAt`).set(Date.now());
       res.json({ ok: true });
     } catch (err) {
@@ -121,9 +122,11 @@ function register(app, admin, db, express) {
 
       // משימות - מכל הרשימות (פרטיות של בעל העסק, של כל משתמש, משותפות)
       const allTasks = [];
+      const createdBy = {}; // uid -> { day -> מספר משימות קיימות שנוצרו באותו יום }
+      const addBy = (uid, t) => { if (!uid || !t.created || uid === OWNER) return; const k = ilDay(t.created); (createdBy[uid] = createdBy[uid] || {})[k] = (createdBy[uid][k] || 0) + 1; };
       Object.values(todo.tasks || {}).forEach((t) => t && allTasks.push(t));
-      Object.values(todo.users || {}).forEach((u) => Object.values((u && u.tasks) || {}).forEach((t) => t && allTasks.push(t)));
-      Object.values(todo.shared || {}).forEach((l) => Object.values((l && l.tasks) || {}).forEach((t) => t && allTasks.push(t)));
+      Object.entries(todo.users || {}).forEach(([uid, u]) => Object.values((u && u.tasks) || {}).forEach((t) => { if (t) { allTasks.push(t); addBy(t.byUid || uid, t); } }));
+      Object.values(todo.shared || {}).forEach((l) => Object.values((l && l.tasks) || {}).forEach((t) => { if (t) { allTasks.push(t); addBy(t.byUid, t); } }));
 
       const days = [];
       for (let i = 29; i >= 0; i--) {
@@ -173,6 +176,31 @@ function register(app, admin, db, express) {
           gcalUsers: Object.keys(gcal).filter((u) => u !== OWNER && !ownerUids.has(u)).length,
         },
         days,
+        ...(() => {
+          // משימות לכל משתמש ביום (14 ימים) + מדדי תלות באפליקציה
+          const N = 14, keys = []; for (let i = N - 1; i >= 0; i--) keys.push(ilDay(now - i * DAY));
+          const counted = (uid, k) => Math.max(Number(((daily[k] || {}).tasksBy || {})[uid]) || 0, ((createdBy[uid] || {})[k]) || 0);
+          const wasActive = (uid, k) => !!(((daily[k] || {}).active || {})[uid]) || counted(uid, k) > 0;
+          const perUser = users.map((u) => {
+            const tasks = keys.map((k) => counted(u.uid, k)), act = keys.map((k) => wasActive(u.uid, k));
+            const activeDays = act.filter(Boolean).length, total = tasks.reduce((a, b) => a + b, 0);
+            return { uid: u.uid, name: names[u.uid] || '', tasks, active: act.map((x) => (x ? 1 : 0)), today: tasks[N - 1], d7: tasks.slice(-7).reduce((a, b) => a + b, 0),
+              total14: total, activeDays, perActiveDay: activeDays ? Math.round((total / activeDays) * 10) / 10 : 0, active7: act.slice(-7).filter(Boolean).length };
+          }).sort((a, b) => b.total14 - a.total14 || b.activeDays - a.activeDays);
+          // אחוז המשתמשים הרשומים (עד אותו יום) שנכנסו בכל יום - 30 יום
+          const pct = days.map((d) => { const reg = users.filter((u) => u.first && ilDay(u.first) <= d.day).length;
+            const act = Object.keys((daily[d.day] || {}).active || {}).filter((x) => x !== OWNER && !ownerUids.has(x)).length;
+            return { day: d.day, registered: reg, active: act, pct: reg ? Math.round((Math.min(act, reg) / reg) * 100) : 0 }; });
+          const last7 = pct.slice(-7), avgDau = last7.reduce((a, d) => a + d.active, 0) / 7;
+          const mau = users.filter((u) => u.s.last && now - u.s.last < 30 * DAY).length;
+          const actTask = perUser.reduce((a, u) => a + u.activeDays, 0);
+          return { perUser, pct, dependence: {
+            stickiness: mau ? Math.round((avgDau / mau) * 100) : 0, // כמה מהפעילים בחודש נכנסים בממוצע כל יום
+            habit: perUser.filter((u) => u.active7 >= 3).length, // נכנסו 3+ ימים בשבוע האחרון
+            users: users.length,
+            tasksPerActiveDay: actTask ? Math.round((perUser.reduce((a, u) => a + u.total14, 0) / actTask) * 10) / 10 : 0,
+          } };
+        })(),
         // מי נכנס ומתי - 14 הימים האחרונים (at = שעת הכניסה האחרונה באותו יום; נתונים ישנים בלי שעה)
         activity: (() => {
           const out = [];
