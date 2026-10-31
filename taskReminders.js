@@ -419,6 +419,9 @@ function register(app, admin, db, express) {
         const members = Object.keys(l.members || {}).filter((m) => SAFE.test(m) && !blocked.has(m));
         if (members.length) await checkUser(members, `todo/shared/${listId}/tasks`, l.tasks, now, '[' + (l.name || 'משותף') + '] ', nagCfg);
       }
+      // מדידת גודל - כמה נתונים נקראים בכל בדיקה (כל דקה) וכמה משתמשים יש. tasksHealth מתריע כשמתקרבים למכסת Firebase
+      health.readBytes = JSON.stringify(nagCfg).length + JSON.stringify(owner || {}).length + JSON.stringify(users).length + JSON.stringify(shared).length;
+      health.userCount = Object.keys(users).length;
       health.lastOkAt = Date.now(); health.consecutiveErr = 0;
     } catch (err) {
       console.error('task reminders tick error:', err.message);

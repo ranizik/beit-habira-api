@@ -6,10 +6,20 @@
  *   - 3 שגיאות רצופות בלולאת התזכורות
  *   - הרבה התראות שנכשלו בשליחה (FCM)
  * בעיה -> התראת Push לבעל העסק ("⚠️ תכל׳ס: ..."), לכל היותר פעם בשעה לכל סוג. חזרה לתקינות -> "✅ חזר לעבוד".
+ * גדילה: כשמספר המשתמשים או כמות הנתונים שבדיקת התזכורות קוראת מתקרבים למכסה החינמית של Firebase (10GB בחודש,
+ *   משותפת עם מערכת ההזמנות של החנות) - התראה חד-פעמית לבעל העסק לבקש את התיקון. נשמר ב-todoScaleAlerts.
  */
 const OWNER = 'staff-tasks';
 const CHECK_MS = 5 * 60 * 1000;
 const REPEAT_MS = 60 * 60 * 1000;
+// ספי גדילה: משתמשים / GB בחודש שבדיקת התזכורות קוראת (קריאה כל דקה)
+const SCALE = [
+  { key: 'users40', test: (u, gb) => u >= 40, urgent: false },
+  { key: 'read3gb', test: (u, gb) => gb >= 3, urgent: false },
+  { key: 'users80', test: (u, gb) => u >= 80, urgent: true },
+  { key: 'read6gb', test: (u, gb) => gb >= 6, urgent: true },
+];
+const monthlyGB = (bytes) => Math.round(((bytes || 0) * 1440 * 30) / 1e8) / 10;
 
 function register(app, admin, db, express) {
   const rem = () => require('./taskReminders');
@@ -51,10 +61,25 @@ function register(app, admin, db, express) {
       const dOk = s.sendOk - state.prevSend.ok, dFail = s.sendFail - state.prevSend.fail;
       state.prevSend = { ok: s.sendOk, fail: s.sendFail };
       await alert('push', dFail >= 5 && dFail > dOk, 'התראות לא נשלחות (' + dFail + ' נכשלו ב-5 הדקות האחרונות)');
+      await scaleCheck();
       // רישום בבסיס הנתונים - לצפייה ב-📊 ולמתכנת
       await db.ref('todoHealth').set({ at: Date.now(), ...s, alerts: Object.fromEntries(Object.entries(state.alerts).map(([k, v]) => [k, !!v.active])) }).catch(() => {});
     } catch (err) {
       console.error('health check error:', err.message);
+    }
+  }
+  async function scaleCheck() {
+    const h = rem().health || {};
+    if (!h.readBytes) return;
+    const users = h.userCount || 0, gb = monthlyGB(h.readBytes);
+    const sent = (await db.ref('todoScaleAlerts').once('value')).val() || {};
+    for (const s of SCALE) {
+      if (sent[s.key] || !s.test(users, gb)) continue;
+      const fn = rem().sendToUser;
+      if (fn) await fn(OWNER, (s.urgent ? '🚨 דחוף – ' : '📈 ') + 'תכל׳ס גדלה: ' + users + ' משתמשים',
+        'בדיקת התזכורות קוראת כ-' + gb + 'GB בחודש (המכסה החינמית: 10GB, משותפת עם מערכת ההזמנות). בקש מ-Claude: "לתקן את סעיף 2 – בדיקת התזכורות" ולהפריד את תכל׳ס מה-Firebase של החנות.', 'health').catch(() => 0);
+      await db.ref(`todoScaleAlerts/${s.key}`).set({ at: Date.now(), users, gb });
+      console.warn('📈 scale alert', s.key, users, gb);
     }
   }
   setInterval(check, CHECK_MS);
@@ -63,4 +88,4 @@ function register(app, admin, db, express) {
   console.log('🩺 בדיקה עצמית של המשימות פעילה');
 }
 
-module.exports = { register };
+module.exports = { register, monthlyGB };

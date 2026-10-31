@@ -333,3 +333,18 @@ test('ניהול: קוד מנהל בלבד לא פותח נתונים; אימו�
     assert.equal(ok.body.ok, true); assert.match(ok.body.token, /staff-tasks.*"gadmin":true/);
   } finally { global.fetch = realFetch; }
 });
+
+// ---------- התראת גדילה ----------
+test('גדילה: התראה חד-פעמית לבעל העסק כשמתקרבים למכסת Firebase', async () => {
+  const db = fakeDb({ todoPushTokens: { 'staff-tasks': { d: { token: 'O' } } } });
+  const admin = fakeAdmin({});
+  const { mods, timers } = load(['taskReminders', 'tasksHealth'], db, admin);
+  const check = timers.find((x) => x.kind === 'interval' && x.ms === 5 * 60000).f;
+  const h = mods.taskReminders.health; h.lastTickAt = Date.now();
+  h.readBytes = 10000; h.userCount = 12; await check();
+  assert.ok(!admin.sent.some((m) => m.title.includes('גדלה')), 'מתחת לסף - אין התראה');
+  h.readBytes = 80000; h.userCount = 45; await check(); await check();
+  const g = admin.sent.filter((m) => m.title.includes('גדלה'));
+  assert.equal(g.length, 2, 'users40 + read3gb, כל אחת פעם אחת'); assert.match(g[0].body, /סעיף 2/);
+  assert.ok(db.get('todoScaleAlerts/users40'));
+});
