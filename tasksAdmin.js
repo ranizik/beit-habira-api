@@ -4,9 +4,15 @@
  *   אימות Google של ranizik@gmail.com - ואז השרת מנפיק כניסה עם סימון gadmin (נשאר במכשיר עד התנתקות).
  *   כך גם מי שמנחש את קוד המנהל לא יכול לראות נתונים של משתמשים אחרים.
  *   POST /tasks/admin/google           { credential }  -> { ok, token }   (חלון קופץ)
- *   POST /tasks/admin/google-redirect  (טופס מגוגל)    -> חזרה ל-beit-habira.com/tasks/#ct=...&n=...&adm=1
+ *   POST /tasks/admin/google-redirect  (טופס מגוגל)    -> חזרה לאפליקציה #ct=...&n=...&adm=1
+ * מעבר כתובת (beit-habira.com/tasks -> tachlesapps.com):
+ *   POST /tasks/transfer (Authorization: Bearer <idToken>) -> { ok, token }  כרטיס כניסה לאותו משתמש, כדי שבכתובת החדשה
+ *   הוא יגיע כבר מחובר (ההתחברות נשמרת בדפדפן לפי כתובת, ולכן בלי זה היה צריך להתחבר מחדש).
  */
 const OWNER = 'staff-tasks';
+// הכתובת של האפליקציה (עברה מ-beit-habira.com/tasks ל-tachlesapps.com)
+const APP_URL = process.env.TASKS_APP_URL || 'https://tachlesapps.com/';
+const TRANSFER_CLAIMS = ['staff', 'staffRole', 'gadmin']; // הרשאות שעוברות יחד עם המשתמש בהעברה לכתובת החדשה
 const ADMIN_EMAILS = ['ranizik@gmail.com'];
 const CLIENT_ID = process.env.GCAL_CLIENT_ID || '895106923239-7ctgh1gc0je4pah4egj0t8h2ajapo95c.apps.googleusercontent.com';
 
@@ -39,8 +45,24 @@ function register(app, admin, db, express) {
     }
   });
 
+  app.post('/tasks/transfer', express.json(), async (req, res) => {
+    try {
+      if (tooMany(req.ip)) return res.status(429).json({ error: 'יותר מדי ניסיונות' });
+      const h = req.headers.authorization || '';
+      const d = h.startsWith('Bearer ') ? await admin.auth().verifyIdToken(h.slice(7)).catch(() => null) : null;
+      if (!d || !/^[-_A-Za-z0-9]{1,128}$/.test(d.uid)) return res.status(401).json({ error: 'אין הרשאה' });
+      if (d.uid.startsWith('staff-') && d.uid !== OWNER) return res.status(403).json({ error: 'לא רלוונטי' }); // עובדי מערכת ההזמנות - לא כאן
+      const claims = {};
+      TRANSFER_CLAIMS.forEach((k) => { if (d[k] !== undefined) claims[k] = d[k]; });
+      res.json({ ok: true, token: await admin.auth().createCustomToken(d.uid, Object.keys(claims).length ? claims : undefined) });
+    } catch (err) {
+      console.error('POST /tasks/transfer error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
   app.post('/tasks/admin/google-redirect', express.urlencoded({ extended: false }), async (req, res) => {
-    const back = (hash) => res.redirect(303, 'https://beit-habira.com/tasks/#' + hash);
+    const back = (hash) => res.redirect(303, APP_URL + '#' + hash);
     try {
       if (tooMany(req.ip)) return back('lerr=' + encodeURIComponent('יותר מדי ניסיונות'));
       // כמו בכניסה הרגילה: הקוד החד-פעמי (nonce) חוזר לאפליקציה, שמשווה אותו לקוד ששמרה - בקשה שלא יצאה ממנה נדחית שם
@@ -54,4 +76,5 @@ function register(app, admin, db, express) {
   });
 }
 
-module.exports = { register, isAdmin, ADMIN_EMAILS };
+
+module.exports = { register, isAdmin, ADMIN_EMAILS, APP_URL };

@@ -189,7 +189,7 @@ function register(app, admin, db, express) {
     const timed = /^\d{2}:\d{2}$/.test(String(t.time || ''));
     const body = {
       summary: (t.done ? '✓ ' : '') + String(t.name || '').slice(0, 900),
-      description: (t.notes ? String(t.notes).slice(0, 2000) + '\n\n' : '') + 'נוסף מתכל׳ס – beit-habira.com/tasks',
+      description: (t.notes ? String(t.notes).slice(0, 2000) + '\n\n' : '') + 'נוסף מתכל׳ס – tachlesapps.com',
       transparency: 'transparent', // לא חוסם זמן ביומן
       reminders: timed && !t.done ? { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] } : { useDefault: false, overrides: [] },
     };
@@ -260,9 +260,9 @@ function register(app, admin, db, express) {
     }
   });
 
-  // דף הבית ומדיניות הפרטיות עברו לאתר (beit-habira.com/tasks) לצורך אימות האפליקציה ב-Google
-  app.get('/tasks/privacy', (req, res) => res.redirect(301, 'https://beit-habira.com/tasks/privacy.html'));
-  app.get('/tasks/home', (req, res) => res.redirect(301, 'https://beit-habira.com/tasks/home.html'));
+  // דף הבית ומדיניות הפרטיות נמצאים באתר של האפליקציה (לצורך אימות האפליקציה ב-Google)
+  app.get('/tasks/privacy', (req, res) => res.redirect(301, require('./tasksAdmin').APP_URL + 'privacy.html'));
+  app.get('/tasks/home', (req, res) => res.redirect(301, require('./tasksAdmin').APP_URL + 'home.html'));
   // אימות בעלות ב-Google Search Console (נדרש לאימות מסך ההרשאה)
   app.get('/googlef6f83aa4fb83a2bb.html', (req, res) => res.type('html').send('google-site-verification: googlef6f83aa4fb83a2bb.html'));
 
@@ -303,7 +303,7 @@ function register(app, admin, db, express) {
   });
   // אייפון / אפליקציה מהמסך הבית: Google שולח לכאן את האישור (טופס), ומשם חוזרים לאפליקציה עם טוקן כניסה בסימן #
   app.post('/tasks/google-login-redirect', express.urlencoded({ extended: false }), async (req, res) => {
-    const back = (hash) => res.redirect(303, 'https://beit-habira.com/tasks/#' + hash);
+    const back = (hash) => res.redirect(303, require('./tasksAdmin').APP_URL + '#' + hash);
     try {
       if (tooMany(req.ip)) return back('lerr=' + encodeURIComponent('יותר מדי ניסיונות'));
       // הגנת אבטחה: עוגיית g_csrf_token של Google לא מגיעה לשרת הזה (דומיין אחר) ודף Google לא שולח Origin.

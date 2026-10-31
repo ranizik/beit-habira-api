@@ -1,5 +1,5 @@
 /**
- * תזכורות Push לאפליקציית המשימות (beit-habira.com/tasks)
+ * תזכורות Push לאפליקציית המשימות תכל׳ס (tachlesapps.com)
  * - רישום מכשיר: POST /tasks/push-register  (Authorization: Bearer <idToken>)  body: { token, deviceId }
  * - בדיקה כל דקה: לכל משימה פתוחה עם תאריך נשלחות 2 תזכורות:
  *     1. ב-20:00 בערב שלפני   2. בשעת המשימה (אם הוגדרה שעה)
@@ -281,7 +281,7 @@ function register(app, admin, db, express) {
       tokens: entries.map(([, v]) => v.token),
       notification: { title, body },
       data: { type: 'task-reminder', taskId: String(taskId), link: '/tasks/', ...(extra || {}) },
-      webpush: { fcmOptions: { link: 'https://beit-habira.com/tasks/' }, headers: { Urgency: 'high', TTL: '21600' } },
+      webpush: { fcmOptions: { link: require('./tasksAdmin').APP_URL }, headers: { Urgency: 'high', TTL: '21600' } },
     });
     const cleanup = {};
     result.responses.forEach((r, i) => {

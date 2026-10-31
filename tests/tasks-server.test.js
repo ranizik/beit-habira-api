@@ -348,3 +348,14 @@ test('גדילה: התראה חד-פעמית לבעל העסק כשמתקרבי�
   assert.equal(g.length, 2, 'users40 + read3gb, כל אחת פעם אחת'); assert.match(g[0].body, /סעיף 2/);
   assert.ok(db.get('todoScaleAlerts/users40'));
 });
+
+// ---------- מעבר כתובת ----------
+test('מעבר כתובת: כרטיס כניסה לאותו משתמש עם אותן הרשאות; בלי התחברות - נדחה', async () => {
+  const db = fakeDb();
+  const admin = fakeAdmin({}); admin.tokens.r = OWNER; admin.tokens.u = { uid: 'abc' }; admin.tokens.w = { uid: 'staff-shfayim-7', staff: 'orders' };
+  const { call } = load(['tasksAdmin'], db, admin);
+  assert.equal((await call('POST', '/tasks/transfer', {})).status, 401);
+  assert.equal((await call('POST', '/tasks/transfer', { token: 'w' })).status, 403);
+  assert.equal((await call('POST', '/tasks/transfer', { token: 'u' })).body.token, 'CT:abc:{}');
+  assert.match((await call('POST', '/tasks/transfer', { token: 'r' })).body.token, /CT:staff-tasks:.*"gadmin":true/);
+});
