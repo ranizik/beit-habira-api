@@ -12,7 +12,7 @@ function fakeDb(initial) {
     if (v === null || v === undefined) delete o[ks[ks.length - 1]]; else o[ks[ks.length - 1]] = JSON.parse(JSON.stringify(v));
   };
   let pushN = 0;
-  const ref = (p) => ({
+  const ref = (p = '') => ({
     key: parts(p).slice(-1)[0],
     once: async () => ({ val: () => { const v = get(p); return v === undefined ? null : JSON.parse(JSON.stringify(v)); } }),
     set: async (v) => set(p, v),

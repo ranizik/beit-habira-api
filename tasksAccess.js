@@ -110,7 +110,7 @@ function register(app, admin, db, express) {
         const maxMembers = ownLists.reduce((m, l) => Math.max(m, Object.keys(l.members || {}).length), 0);
         users.push({
           uid, name: a.name || info.name || '', email: a.email || info.email || '', kind: a.kind || '',
-          joined: info.created || a.start || null, last: (stats[uid] || {}).last || null,
+          joined: info.created || a.start || null, last: (stats[uid] || {}).last || null, opens: (stats[uid] || {}).opens || 0,
           tasks: tasks.length, open: tasks.filter((t) => !t.done).length, lists: ownLists.length, maxMembers,
           ...pub(a, cfg, now),
         });

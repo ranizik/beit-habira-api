@@ -3,9 +3,10 @@
  *   POST /tasks/stats/ping    { standalone, platform }      - בכל פתיחה של האפליקציה (משתמש מחובר)
  *   POST /tasks/stats/event   { type: install|task_voice|task_typed }
  *   POST /tasks/stats/summary                                - רק לבעל העסק (כניסת מנהל)
+ *   POST /tasks/stats/clear   { uid? }                       - רק לבעל העסק: מחיקת היסטוריית השימוש (של משתמש אחד או של כולם)
  * נשמר ב-Firebase (נגיש רק לשרת):
  *   todoStats/users/<uid>  = { first, last, opens, standalone, platform, installedAt }
- *   todoStats/daily/<YYYY-MM-DD> = { active: {uid:true}, opens, install, task_voice, task_typed }
+ *   todoStats/daily/<YYYY-MM-DD> = { active: {uid:ts}, opens, install, task_voice, task_typed }
  * נתונים מלפני ההפעלה נלקחים מהמידע הקיים: תאריך הרשמה מ-Firebase Auth, ומשימות לפי שדה created.
  */
 const SAFE = /^[-_A-Za-z0-9]{1,128}$/;
@@ -34,7 +35,7 @@ function register(app, admin, db, express) {
       if (standalone) { upd.standalone = true; upd.lastStandalone = now; }
       await uref.update(upd);
       const day = db.ref(`todoStats/daily/${ilDay(now)}`);
-      await day.child(`active/${d.uid}`).set(true);
+      await day.child(`active/${d.uid}`).set(now); // שעת הכניסה האחרונה באותו יום
       await inc(day.child('opens'));
       res.json({ ok: true });
     } catch (err) {
@@ -100,6 +101,7 @@ function register(app, admin, db, express) {
       const uids = new Set([...Object.keys(sUsers), ...Object.keys(todo.users || {})].filter((u) => u !== OWNER && SAFE.test(u)));
       Object.values(todo.shared || {}).forEach((l) => Object.keys((l && l.members) || {}).forEach((u) => u !== OWNER && SAFE.test(u) && uids.add(u)));
       const created = {};
+      const names = {};
       const ownerUids = new Set();
       const { OWNER_EMAILS } = require('./tasksAccess');
       const list = [...uids];
@@ -107,6 +109,7 @@ function register(app, admin, db, express) {
         const r = await admin.auth().getUsers(list.slice(i, i + 100).map((uid) => ({ uid })));
         r.users.forEach((u) => {
           created[u.uid] = Date.parse(u.metadata.creationTime) || null;
+          names[u.uid] = u.displayName || u.email || '';
           if (OWNER_EMAILS.includes(String(u.email || '').toLowerCase())) ownerUids.add(u.uid); // החשבון הפרטי של בעל העסק - לא נספר
           const ls = Date.parse(u.metadata.lastRefreshTime || u.metadata.lastSignInTime) || 0;
           if (!sUsers[u.uid]) sUsers[u.uid] = {};
@@ -170,9 +173,46 @@ function register(app, admin, db, express) {
           gcalUsers: Object.keys(gcal).filter((u) => u !== OWNER && !ownerUids.has(u)).length,
         },
         days,
+        // מי נכנס ומתי - 14 הימים האחרונים (at = שעת הכניסה האחרונה באותו יום; נתונים ישנים בלי שעה)
+        activity: (() => {
+          const out = [];
+          for (let i = 0; i < 14; i++) {
+            const key = ilDay(now - i * DAY);
+            const act = (daily[key] || {}).active || {};
+            const people = Object.entries(act).filter(([u]) => u !== OWNER && !ownerUids.has(u) && SAFE.test(u))
+              .map(([u, at]) => ({ uid: u, name: names[u] || '', at: typeof at === 'number' ? at : null }))
+              .sort((a, b) => (b.at || 0) - (a.at || 0));
+            if (people.length) out.push({ day: key, people });
+          }
+          return out;
+        })(),
       });
     } catch (err) {
       console.error('POST /tasks/stats/summary error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+
+  // מחיקת היסטוריית שימוש: uid - של משתמש אחד, בלי uid - של כולם (הספירות הכלליות של כניסות לקישור נשמרות)
+  app.post('/tasks/stats/clear', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
+      const uid = req.body && req.body.uid;
+      if (uid != null && !SAFE.test(String(uid))) return res.status(400).json({ error: 'משתמש לא תקין' });
+      const daily = (await db.ref('todoStats/daily').once('value')).val() || {};
+      const upd = {};
+      if (uid) {
+        upd[`todoStats/users/${uid}`] = null;
+        Object.keys(daily).forEach((k) => { if (daily[k] && daily[k].active && daily[k].active[uid] != null) upd[`todoStats/daily/${k}/active/${uid}`] = null; });
+      } else {
+        upd['todoStats/users'] = null;
+        Object.keys(daily).forEach((k) => { if (daily[k] && daily[k].active) upd[`todoStats/daily/${k}/active`] = null; });
+      }
+      await db.ref().update(upd);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error('POST /tasks/stats/clear error:', err.message);
       res.status(500).json({ error: 'שגיאת שרת' });
     }
   });

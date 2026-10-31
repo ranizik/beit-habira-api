@@ -186,6 +186,30 @@ test('נתונים: כניסה לקישור נספרת, מזהה לא חוקי �
   assert.equal(s.body.visits.today, 1); assert.equal(s.body.days.length, 30);
 });
 
+test('נתונים: מי נכנס ומתי, ומחיקת היסטוריה (למשתמש אחד ולכולם)', async () => {
+  const db = fakeDb();
+  const admin = fakeAdmin({ a: { name: 'דני' }, b: { name: 'יוסי' } });
+  admin.tokens.r = OWNER; admin.tokens.a = { uid: 'a' }; admin.tokens.b = { uid: 'b' };
+  const { call } = load(['taskReminders', 'tasksAccess', 'tasksStats'], db, admin);
+  await call('POST', '/tasks/stats/ping', { token: 'a', body: {} });
+  await call('POST', '/tasks/stats/ping', { token: 'a', body: {} });
+  await call('POST', '/tasks/stats/ping', { token: 'b', body: {} });
+  let s = (await call('POST', '/tasks/stats/summary', { token: 'r' })).body;
+  assert.equal(s.activity.length, 1);
+  assert.deepEqual(s.activity[0].people.map((p) => p.name).sort(), ['דני', 'יוסי']);
+  assert.ok(typeof s.activity[0].people[0].at === 'number');
+  const l = (await call('POST', '/tasks/access/list', { token: 'r' })).body;
+  assert.equal(l.users.find((u) => u.uid === 'a').opens, 2);
+  assert.equal((await call('POST', '/tasks/stats/clear', { token: 'a', body: {} })).status, 401);
+  assert.equal((await call('POST', '/tasks/stats/clear', { token: 'r', body: { uid: 'a' } })).body.ok, true);
+  s = (await call('POST', '/tasks/stats/summary', { token: 'r' })).body;
+  assert.deepEqual(s.activity[0].people.map((p) => p.name), ['יוסי']);
+  await call('POST', '/tasks/stats/clear', { token: 'r', body: {} });
+  s = (await call('POST', '/tasks/stats/summary', { token: 'r' })).body;
+  assert.equal(s.activity.length, 0);
+  assert.equal(s.visits.total, 0);
+});
+
 test('בריאות: /tasks/health ובדיקה עצמית עם התראה לבעלים', async () => {
   const db = fakeDb({ todoPushTokens: { 'staff-tasks': { d: { token: 'T' } } } });
   const admin = fakeAdmin({});
