@@ -1,6 +1,6 @@
 // כלי עזר לבדיקות: Firebase מדומה (בזיכרון), Express מדומה, ו-FCM מדומה
 const path = require('path');
-const MODS = ['taskReminders', 'tasksGcal', 'tasksStats', 'tasksAccess', 'tasksHealth', 'tasksBackup'];
+const MODS = ['taskReminders', 'tasksGcal', 'tasksStats', 'tasksAccess', 'tasksHealth', 'tasksBackup', 'tasksAdmin'];
 
 function fakeDb(initial) {
   const store = JSON.parse(JSON.stringify(initial || {}));
@@ -31,6 +31,7 @@ function fakeAdmin(users) {
   return {
     sent, tokens,
     auth: () => ({
+      createCustomToken: async (uid, claims) => 'CT:' + uid + ':' + JSON.stringify(claims || {}),
       verifyIdToken: async (t) => { if (tokens[t]) return tokens[t]; throw new Error('bad token'); },
       getUser: async (uid) => ({ uid, metadata: { creationTime: new Date((users && users[uid] && users[uid].created) || 0).toUTCString() } }),
       getUsers: async (list) => ({ users: list.map(({ uid }) => ({ uid, email: (users && users[uid] && users[uid].email) || uid + '@x.com', displayName: (users && users[uid] && users[uid].name) || uid, metadata: { creationTime: new Date((users && users[uid] && users[uid].created) || 0).toUTCString() } })) }),

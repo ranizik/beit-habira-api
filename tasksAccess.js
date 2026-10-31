@@ -13,7 +13,7 @@
  */
 const SAFE = /^[-_A-Za-z0-9]{1,128}$/;
 const OWNER = 'staff-tasks';
-const OWNER_EMAILS = ['ranizik@gmail.com']; // החשבון של בעל העסק ב-Google - אף פעם לא ננעל
+const { isAdmin, ADMIN_EMAILS: OWNER_EMAILS } = require('./tasksAdmin'); // החשבון של בעל העסק ב-Google - אף פעם לא ננעל
 const DAY = 864e5;
 // freeMode = תקופת הרצה: כל מי שאושר משתמש בחינם בלי הגבלת זמן (אין נעילה אוטומטית ואין תזכורות סוף תקופה)
 // מסלולים: פרטי / עסקי - מחיר חודשי, כמה משתתפים ברשימה משותפת כלולים, ומחיר לכל משתתף נוסף
@@ -89,7 +89,7 @@ function register(app, admin, db, express) {
   app.post('/tasks/access/list', express.json(), async (req, res) => {
     try {
       const d = await authUser(req);
-      if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
+      if (!isAdmin(d)) return res.status(401).json({ error: 'רק לבעל העסק (אימות Google)' });
       const [acc, todo, stats] = await Promise.all(['todoAccess/users', 'todo', 'todoStats/users'].map((p) => db.ref(p).once('value').then((s) => s.val() || {})));
       const uids = new Set([...Object.keys(acc), ...Object.keys(todo.users || {}), ...Object.keys(stats)].filter((u) => u !== OWNER && SAFE.test(u)));
       const authInfo = {};
@@ -127,7 +127,7 @@ function register(app, admin, db, express) {
   app.post('/tasks/access/set', express.json(), async (req, res) => {
     try {
       const d = await authUser(req);
-      if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
+      if (!isAdmin(d)) return res.status(401).json({ error: 'רק לבעל העסק (אימות Google)' });
       const { uid, action, days, until, kind, price, extra } = req.body || {};
       if (!SAFE.test(String(uid || '')) || uid === OWNER) return res.status(400).json({ error: 'משתמש לא תקף' });
       const a = await ensure(uid, {}, 0);
@@ -185,7 +185,7 @@ function register(app, admin, db, express) {
   app.post('/tasks/access/config', express.json(), async (req, res) => {
     try {
       const d = await authUser(req);
-      if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
+      if (!isAdmin(d)) return res.status(401).json({ error: 'רק לבעל העסק (אימות Google)' });
       const b = req.body || {};
       const upd = {};
       if (b.trialDays != null) { const v = Math.round(Number(b.trialDays)); if (v >= 1 && v <= 365) upd.trialDays = v; }

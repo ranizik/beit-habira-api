@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { fakeDb, fakeAdmin, load, ilAgo, ilHourNow } = require('./helpers');
 
-const OWNER = { uid: 'staff-tasks' };
+const OWNER = { uid: 'staff-tasks', gadmin: true }; // כניסת מנהל אחרי אימות Google
 const quietNow = () => { const h = ilHourNow(); return h >= 22 || h < 7; };
 
 // ---------- מנויים / אישור משתמשים ----------
@@ -312,4 +312,24 @@ test('גיבוי: נשמר דחוס, אפשר להוריד, רק 30 אחרוני
   assert.equal(g.data.todo.users.a.tasks.t1.name, 'לקנות חלב');
   assert.equal(g.data.todoGcal, undefined, 'הרשאות יומן לא נשמרות בגיבוי');
   assert.equal((await call('POST', '/tasks/backup/get', { token: 'r', body: { day: '../x' } })).status, 400);
+});
+
+// ---------- ניהול רק אחרי אימות Google ----------
+test('ניהול: קוד מנהל בלבד לא פותח נתונים; אימות Google של בעל העסק כן', async () => {
+  const db = fakeDb();
+  const admin = fakeAdmin({}); admin.tokens.pin = { uid: 'staff-tasks', staff: 'tasks' }; admin.tokens.r = OWNER;
+  const { call } = load(['tasksAccess', 'tasksStats', 'tasksBackup', 'tasksAdmin'], db, admin);
+  for (const p of ['/tasks/access/list', '/tasks/stats/summary', '/tasks/backup/list', '/tasks/stats/clear', '/tasks/access/config']) {
+    assert.equal((await call('POST', p, { token: 'pin', body: {} })).status, 401, p + ' חסום עם קוד בלבד');
+  }
+  assert.equal((await call('POST', '/tasks/access/list', { token: 'r' })).status, 200);
+  const realFetch = global.fetch;
+  const tokeninfo = (email) => async () => ({ ok: true, json: async () => ({ aud: '895106923239-7ctgh1gc0je4pah4egj0t8h2ajapo95c.apps.googleusercontent.com', iss: 'accounts.google.com', email, email_verified: 'true', exp: String(Math.floor(Date.now() / 1000) + 600), nonce: 'N1' }) });
+  try {
+    global.fetch = tokeninfo('someone@gmail.com');
+    assert.equal((await call('POST', '/tasks/admin/google', { body: { credential: 'x' } })).status, 403, 'חשבון אחר נדחה');
+    global.fetch = tokeninfo('ranizik@gmail.com');
+    const ok = await call('POST', '/tasks/admin/google', { body: { credential: 'x' } });
+    assert.equal(ok.body.ok, true); assert.match(ok.body.token, /staff-tasks.*"gadmin":true/);
+  } finally { global.fetch = realFetch; }
 });

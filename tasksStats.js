@@ -89,7 +89,7 @@ function register(app, admin, db, express) {
   app.post('/tasks/stats/summary', express.json(), async (req, res) => {
     try {
       const d = await authUser(req);
-      if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
+      if (!require('./tasksAdmin').isAdmin(d)) return res.status(401).json({ error: 'רק לבעל העסק (אימות Google)' });
       const now = Date.now();
       const DAY = 864e5;
       const visitorsP = db.ref('todoStats/visitors').once('value').then((x) => x.val() || {});
@@ -225,7 +225,7 @@ function register(app, admin, db, express) {
   app.post('/tasks/stats/clear', express.json(), async (req, res) => {
     try {
       const d = await authUser(req);
-      if (!d || d.uid !== OWNER) return res.status(401).json({ error: 'רק לבעל העסק' });
+      if (!require('./tasksAdmin').isAdmin(d)) return res.status(401).json({ error: 'רק לבעל העסק (אימות Google)' });
       const uid = req.body && req.body.uid;
       if (uid != null && !SAFE.test(String(uid))) return res.status(400).json({ error: 'משתמש לא תקין' });
       const daily = (await db.ref('todoStats/daily').once('value')).val() || {};

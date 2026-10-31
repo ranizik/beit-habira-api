@@ -30,7 +30,7 @@ function register(app, admin, db, express) {
   async function isOwner(req) {
     const h = req.headers.authorization || '';
     const d = h.startsWith('Bearer ') ? await admin.auth().verifyIdToken(h.slice(7)).catch(() => null) : null;
-    return !!(d && d.uid === OWNER);
+    return require('./tasksAdmin').isAdmin(d);
   }
 
   let running = false;
