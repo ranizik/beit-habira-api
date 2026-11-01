@@ -280,7 +280,7 @@ function register(app, admin, db, express) {
     const result = await admin.messaging().sendEachForMulticast({
       tokens: entries.map(([, v]) => v.token),
       notification: { title, body },
-      data: { type: 'task-reminder', taskId: String(taskId), link: '/tasks/', ...(extra || {}) },
+      data: { type: 'task-reminder', taskId: String(taskId), ...(extra || {}) }, // בלי link - ה-Service Worker פותח את הכתובת שבה הוא מותקן (חדשה או ישנה)
       webpush: { fcmOptions: { link: require('./tasksAdmin').APP_URL }, headers: { Urgency: 'high', TTL: '21600' } },
     });
     const cleanup = {};
