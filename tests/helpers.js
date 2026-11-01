@@ -1,6 +1,6 @@
 // כלי עזר לבדיקות: Firebase מדומה (בזיכרון), Express מדומה, ו-FCM מדומה
 const path = require('path');
-const MODS = ['taskReminders', 'tasksGcal', 'tasksStats', 'tasksAccess', 'tasksHealth', 'tasksBackup', 'tasksAdmin'];
+const MODS = ['taskReminders', 'tasksGcal', 'tasksStats', 'tasksAccess', 'tasksHealth', 'tasksBackup', 'tasksAdmin', 'tasksGuest'];
 
 function fakeDb(initial) {
   const store = JSON.parse(JSON.stringify(initial || {}));
@@ -33,7 +33,9 @@ function fakeAdmin(users) {
     auth: () => ({
       createCustomToken: async (uid, claims) => 'CT:' + uid + ':' + JSON.stringify(claims || {}),
       verifyIdToken: async (t) => { if (tokens[t]) return tokens[t]; throw new Error('bad token'); },
-      getUser: async (uid) => ({ uid, metadata: { creationTime: new Date((users && users[uid] && users[uid].created) || 0).toUTCString() } }),
+      getUser: async (uid) => { const u = (users && users[uid]) || {}; return { uid, email: u.email, displayName: u.name, metadata: { creationTime: new Date(u.created || 0).toUTCString() } }; },
+      createUser: async (p) => { const uid = 'g' + String(Object.keys(users || {}).length + 1).padStart(27, '0'); users[uid] = { name: p.displayName, created: Date.now() }; return { uid }; },
+      updateUser: async (uid, p) => { users[uid] = { ...(users[uid] || {}), ...(p.email ? { email: p.email } : {}), ...(p.displayName ? { name: p.displayName } : {}) }; return { uid }; },
       getUsers: async (list) => ({ users: list.map(({ uid }) => ({ uid, email: (users && users[uid] && users[uid].email) || uid + '@x.com', displayName: (users && users[uid] && users[uid].name) || uid, metadata: { creationTime: new Date((users && users[uid] && users[uid].created) || 0).toUTCString() } })) }),
       getUserByEmail: async (e) => { const f = Object.entries(users || {}).find(([, u]) => u.email === e); if (!f) throw new Error('no user'); return { uid: f[0], email: e, displayName: f[1].name }; },
     }),

@@ -915,6 +915,8 @@ require('./tasksGcal').register(app, admin, db, express);
 require('./tasksStats').register(app, admin, db, express);
 require('./tasksAccess').register(app, admin, db, express);
 require('./tasksHealth').register(app, admin, db, express);
+// כניסה כאורח (בלי Google) + חיבור ל-Google מאוחר יותר
+require('./tasksGuest').register(app, admin, db, express);
 // ניהול תכל׳ס רק אחרי אימות Google של בעל העסק
 require('./tasksAdmin').register(app, admin, db, express);
 // גיבוי לילי של נתוני תכל׳ס (30 יום אחורה)

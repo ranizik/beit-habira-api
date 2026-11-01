@@ -359,3 +359,37 @@ test('מעבר כתובת: כרטיס כניסה לאותו משתמש עם או
   assert.equal((await call('POST', '/tasks/transfer', { token: 'u' })).body.token, 'CT:abc:{}');
   assert.match((await call('POST', '/tasks/transfer', { token: 'r' })).body.token, /CT:staff-tasks:.*"gadmin":true/);
 });
+
+// ---------- כניסה כאורח ----------
+test('אורח: נרשם עם שם בלבד, ואחר כך מתחבר ל-Google (חשבון חדש / מיזוג לחשבון קיים)', async () => {
+  const db = fakeDb({ todo: { users: { exist: { tasks: { e1: { name: 'ישנה' } } } } } });
+  const users = { exist: { email: 'old@gmail.com', name: 'קיים' } };
+  const admin = fakeAdmin(users);
+  const { call } = load(['tasksGuest'], db, admin);
+  assert.equal((await call('POST', '/tasks/guest/start', { body: { name: 'א' } })).status, 400);
+  const s = await call('POST', '/tasks/guest/start', { body: { name: '  דנה <b>  ' } });
+  assert.equal(s.body.ok, true);
+  const guid = Object.keys(users).find((u) => u.startsWith('g'));
+  assert.equal(users[guid].name, 'דנה b');
+  admin.tokens.g = { uid: guid };
+  db.ref(`todo/users/${guid}/tasks/t1`).set({ name: 'של האורח' });
+  const realFetch = global.fetch;
+  const tokeninfo = (email, nonce) => async () => ({ ok: true, json: async () => ({ aud: '895106923239-7ctgh1gc0je4pah4egj0t8h2ajapo95c.apps.googleusercontent.com', iss: 'accounts.google.com', email, email_verified: 'true', exp: String(Math.floor(Date.now() / 1000) + 600), nonce }) });
+  try {
+    // מיזוג לחשבון Google קיים
+    global.fetch = tokeninfo('old@gmail.com');
+    const m = await call('POST', '/tasks/guest/link', { token: 'g', body: { credential: 'x' } });
+    assert.equal(m.body.merged, true); assert.match(m.body.token, /CT:exist/);
+    assert.equal(db.get('todo/users/exist/tasks/t1').name, 'של האורח'); assert.equal(db.get('todo/users/exist/tasks/e1').name, 'ישנה');
+    // אורח שני - חשבון Google חדש, דרך מעבר לגוגל וחזרה (כרטיס בתוך ה-nonce)
+    await call('POST', '/tasks/guest/start', { body: { name: 'יוסי' } });
+    const g2 = Object.keys(users).filter((u) => u.startsWith('g'))[1]; admin.tokens.g2 = { uid: g2 };
+    const t = (await call('POST', '/tasks/guest/link-ticket', { token: 'g2' })).body.ticket;
+    global.fetch = tokeninfo('new@gmail.com', t);
+    const r = await call('POST', '/tasks/guest/link-redirect', { body: { credential: 'x' } });
+    assert.match(r.location || '', /#ct=.*&lnk=1/);
+    assert.equal(users[g2].email, 'new@gmail.com');
+    global.fetch = tokeninfo('other@gmail.com');
+    assert.equal((await call('POST', '/tasks/guest/link', { token: 'g2', body: { credential: 'x' } })).status, 400, 'כבר מחובר');
+  } finally { global.fetch = realFetch; }
+});
