@@ -249,6 +249,20 @@ function register(app, admin, db, express) {
     return n;
   };
 
+  // חד-פעמי: עד עכשיו כל אירוע ביומן צלצל בשעת המשימה (כפילות עם התראת תכל׳ס). ברירת המחדל החדשה - בלי צלצול מהיומן.
+  // מסירים את הצלצול מאירועים עתידיים של מי שלא ביקש במפורש "צלצול גם מהיומן"
+  setTimeout(async () => {
+    try {
+      if ((await db.ref('todoMigrations/calAlertOff').once('value')).val()) return;
+      const [gcal, nag] = await Promise.all(['todoGcal', 'todoNag'].map((x) => db.ref(x).once('value').then((s2) => s2.val() || {})));
+      for (const [uid, g] of Object.entries(gcal)) {
+        if (!g || !g.events || (nag[uid] && nag[uid].calAlert === true)) continue;
+        await require('./taskReminders').patchCalAlerts(uid, false).catch(() => 0);
+      }
+      await db.ref('todoMigrations/calAlertOff').set(Date.now());
+    } catch (e) { console.error('calAlert migration:', e.message); }
+  }, 90 * 1000);
+
   // הפעלה/כיבוי "גם כאירוע ביומן". בהפעלה - יוצר אירועים למשימות הפתוחות שכבר ביומן; בכיבוי - מוחק את האירועים
   app.post('/tasks/gcal/events', express.json(), async (req, res) => {
     try {

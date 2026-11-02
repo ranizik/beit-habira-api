@@ -337,7 +337,7 @@ function register(app, admin, db, express) {
       const prev = (await ref.once('value')).val() || {};
       if (Object.keys(upd).length) await ref.update(upd);
       // שינוי "צלצול גם מהיומן" - מעדכנים גם את האירועים הקיימים ביומן (ברקע)
-      if (upd.calAlert !== undefined && upd.calAlert !== !!prev.calAlert && module.exports.patchCalAlerts) module.exports.patchCalAlerts(d.uid, upd.calAlert).catch(() => {});
+      if (upd.calAlert !== undefined && (prev.calAlert === undefined || upd.calAlert !== !!prev.calAlert) && module.exports.patchCalAlerts) module.exports.patchCalAlerts(d.uid, upd.calAlert).catch(() => {});
       const cur = { ...NAG_DEFAULT, ...prev, ...upd };
       if (!Array.isArray(cur.before)) cur.before = [];
       res.json({ ok: true, ...cur });
