@@ -90,7 +90,7 @@ function register(app, admin, db, express) {
     try {
       const d = await authUser(req);
       if (!isAdmin(d)) return res.status(401).json({ error: 'רק לבעל העסק (אימות Google)' });
-      const [acc, todo, stats] = await Promise.all(['todoAccess/users', 'todo', 'todoStats/users'].map((p) => db.ref(p).once('value').then((s) => s.val() || {})));
+      const [acc, todo, stats, consent] = await Promise.all(['todoAccess/users', 'todo', 'todoStats/users', 'todoConsent'].map((p) => db.ref(p).once('value').then((s) => s.val() || {})));
       const uids = new Set([...Object.keys(acc), ...Object.keys(todo.users || {}), ...Object.keys(stats)].filter((u) => u !== OWNER && SAFE.test(u)));
       const authInfo = {};
       const list = [...uids];
@@ -112,6 +112,7 @@ function register(app, admin, db, express) {
           uid, name: a.name || info.name || '', email: a.email || info.email || '', kind: a.kind || '', guest: !(a.email || info.email), // אורח = נרשם בלי Google
           joined: info.created || a.start || null, last: (stats[uid] || {}).last || null, opens: (stats[uid] || {}).opens || 0,
           tasks: tasks.length, open: tasks.filter((t) => !t.done).length, lists: ownLists.length, maxMembers,
+          consent: consent[uid] ? { at: consent[uid].at || null, termsV: consent[uid].termsV || '', privacyV: consent[uid].privacyV || '', marketing: !!consent[uid].marketing } : null,
           ...pub(a, cfg, now),
         });
       }
@@ -195,6 +196,7 @@ function register(app, admin, db, express) {
       for (const k of ['membersPrivate', 'membersBusiness', 'extraPricePrivate', 'extraPriceBusiness']) if (b[k] != null && b[k] !== '') { const v = Math.round(Number(b[k])); if (v >= 0 && v <= 10000) upd[k] = v; }
       if (b.approval != null) upd.approval = !!b.approval;
       if (b.freeMode != null) upd.freeMode = !!b.freeMode;
+      if (b.consentActive != null) upd.consentActive = !!b.consentActive; // חובת אישור תנאים - רק אחרי פרסום המסמכים
       if (b.contact != null) { const v = String(b.contact).replace(/[^0-9+]/g, '').slice(0, 15); if (v.length >= 9) upd.contact = v; }
       await db.ref('todoAccess/config').update(upd);
       res.json({ ok: true, config: await getConfig() });

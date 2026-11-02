@@ -1,6 +1,6 @@
 // כלי עזר לבדיקות: Firebase מדומה (בזיכרון), Express מדומה, ו-FCM מדומה
 const path = require('path');
-const MODS = ['taskReminders', 'tasksGcal', 'tasksStats', 'tasksAccess', 'tasksHealth', 'tasksBackup', 'tasksAdmin', 'tasksGuest'];
+const MODS = ['taskReminders', 'tasksGcal', 'tasksStats', 'tasksAccess', 'tasksHealth', 'tasksBackup', 'tasksAdmin', 'tasksGuest', 'tasksConsent'];
 
 function fakeDb(initial) {
   const store = JSON.parse(JSON.stringify(initial || {}));

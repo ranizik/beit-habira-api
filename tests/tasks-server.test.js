@@ -393,3 +393,28 @@ test('אורח: נרשם עם שם בלבד, ואחר כך מתחבר ל-Google 
     assert.equal((await call('POST', '/tasks/guest/link', { token: 'g2', body: { credential: 'x' } })).status, 400, 'כבר מחובר');
   } finally { global.fetch = realFetch; }
 });
+
+// ---------- אישור תנאים ----------
+test('הסכמה: כבוי - אף אחד לא נחסם; פעיל - משתמש קיים מתבקש לאשר, בעל העסק אף פעם; נשמר גרסה ותאריך, בלי למחוק נתונים', async () => {
+  const db = fakeDb({ todo: { users: { u1: { tasks: { t1: { name: 'משימה' } } } } } });
+  const admin = fakeAdmin({}); admin.tokens.u = { uid: 'u1' }; admin.tokens.r = OWNER; admin.tokens.g = { uid: 'rg', email: 'ranizik@gmail.com', email_verified: true };
+  const { call } = load(['tasksAccess', 'tasksConsent', 'tasksAdmin'], db, admin);
+  assert.equal((await call('POST', '/tasks/consent/public', {})).body.active, false);
+  assert.equal((await call('POST', '/tasks/consent/status', { token: 'u' })).body.need, false, 'כבוי - לא חוסם');
+  await call('POST', '/tasks/access/config', { token: 'r', body: { consentActive: true } });
+  assert.equal((await call('POST', '/tasks/consent/public', {})).body.active, true);
+  assert.equal((await call('POST', '/tasks/consent/status', { token: 'u' })).body.need, true, 'משתמש קיים מתבקש לאשר');
+  assert.equal((await call('POST', '/tasks/consent/status', { token: 'r' })).body.need, false, 'מנהל לא נחסם');
+  assert.equal((await call('POST', '/tasks/consent/status', { token: 'g' })).body.need, false, 'חשבון Google של בעל העסק לא נחסם');
+  assert.equal((await call('POST', '/tasks/consent/accept', { token: 'u', body: { terms: '0.9', privacy: '1.0' } })).status, 409, 'גרסה ישנה נדחית');
+  assert.equal((await call('POST', '/tasks/consent/accept', { token: 'u', body: { terms: '1.0', privacy: '1.0', marketing: false } })).body.ok, true);
+  const rec = db.get('todoConsent/u1');
+  assert.equal(rec.termsV, '1.0'); assert.ok(rec.at > 0); assert.equal(rec.marketing, false);
+  assert.equal((await call('POST', '/tasks/consent/status', { token: 'u' })).body.need, false);
+  assert.equal(db.get('todo/users/u1/tasks/t1').name, 'משימה', 'הנתונים לא נפגעו');
+  await call('POST', '/tasks/consent/marketing', { token: 'u', body: { on: true } });
+  assert.equal(db.get('todoConsent/u1').marketing, true);
+  assert.equal(Object.keys(db.get('todoConsentLog/u1')).length, 2, 'היסטוריית הסכמות');
+  const list = (await call('POST', '/tasks/access/list', { token: 'r' })).body.users;
+  assert.equal(list.find((x) => x.uid === 'u1').consent.termsV, '1.0');
+});
