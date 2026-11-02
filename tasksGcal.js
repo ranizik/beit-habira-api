@@ -185,13 +185,14 @@ function register(app, admin, db, express) {
     const p = (n) => String(n).padStart(2, '0');
     return { date: t.getUTCFullYear() + '-' + p(t.getUTCMonth() + 1) + '-' + p(t.getUTCDate()), time: p(t.getUTCHours()) + ':' + p(t.getUTCMinutes()) };
   }
-  function eventBody(t) {
+  function eventBody(t, alert) {
     const timed = /^\d{2}:\d{2}$/.test(String(t.time || ''));
     const body = {
       summary: (t.done ? '✓ ' : '') + String(t.name || '').slice(0, 900),
       description: (t.notes ? String(t.notes).slice(0, 2000) + '\n\n' : '') + 'נוסף מתכל׳ס – tachlesapps.com',
       transparency: 'transparent', // לא חוסם זמן ביומן
-      reminders: timed && !t.done ? { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] } : { useDefault: false, overrides: [] },
+      // צלצול מהיומן רק אם המשתמש ביקש (calAlert) - אחרת התזכורת מגיעה רק מתכל׳ס, בלי כפילויות
+      reminders: timed && !t.done && alert ? { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] } : { useDefault: false, overrides: [] },
     };
     if (t.pri === 'high' && !t.done) body.colorId = '11';
     else if (t.done) body.colorId = '8';
@@ -219,16 +220,34 @@ function register(app, admin, db, express) {
       return;
     }
     if (!task || !/^\d{4}-\d{2}-\d{2}$/.test(String(task.date || ''))) return;
+    const alert = !!((await db.ref(`todoNag/${uid}/calAlert`).once('value')).val());
     if (evId) {
-      const r = await fetch(CAL_BASE + '/' + evId, { method: 'PATCH', headers: H, body: JSON.stringify(eventBody(task)) });
+      const r = await fetch(CAL_BASE + '/' + evId, { method: 'PATCH', headers: H, body: JSON.stringify(eventBody(task, alert)) });
       if (r.ok) return;
       if (r.status !== 404 && r.status !== 410) throw new Error('event patch ' + r.status);
     }
-    const r = await fetch(CAL_BASE, { method: 'POST', headers: H, body: JSON.stringify(eventBody(task)) });
+    const r = await fetch(CAL_BASE, { method: 'POST', headers: H, body: JSON.stringify(eventBody(task, alert)) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error('event create ' + r.status + ' ' + ((j.error && j.error.message) || ''));
     await mapRef.set(j.id);
   }
+
+  // שינוי "צלצול גם מהיומן" בהגדרות - מעדכן את התזכורת באירועים עתידיים שכבר ביומן
+  require('./taskReminders').patchCalAlerts = async (uid, on) => {
+    const token = await accessToken(uid); if (!token) return 0;
+    const map = (await db.ref(`todoGcalEv/${uid}`).once('value')).val() || {};
+    const H = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+    let n = 0;
+    for (const evId of Object.values(map).slice(0, 300)) {
+      if (!/^[A-Za-z0-9_-]{1,200}$/.test(String(evId))) continue;
+      const ev = await fetch(CAL_BASE + '/' + evId, { headers: H }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      if (!ev || !ev.start || !ev.start.dateTime || Date.parse(ev.start.dateTime) < Date.now() || String(ev.summary || '').startsWith('✓')) continue;
+      const r = await fetch(CAL_BASE + '/' + evId, { method: 'PATCH', headers: H, body: JSON.stringify({ reminders: on ? { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] } : { useDefault: false, overrides: [] } }) }).catch(() => null);
+      if (r && r.ok) n++;
+    }
+    console.log('📅 calAlert', on, 'patched', n, 'events for', uid);
+    return n;
+  };
 
   // הפעלה/כיבוי "גם כאירוע ביומן". בהפעלה - יוצר אירועים למשימות הפתוחות שכבר ביומן; בכיבוי - מוחק את האירועים
   app.post('/tasks/gcal/events', express.json(), async (req, res) => {

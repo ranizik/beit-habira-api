@@ -295,10 +295,15 @@ function register(app, admin, db, express) {
   }
   module.exports.sendToUser = sendToUser; // גם למודול המנויים (tasksAccess)
 
-  // ---------- נודניק: משימה עם שעה שלא בוצעה - תזכורת חוזרת כל X דקות עד שמסמנים בוצע ----------
-  // הגדרה למשתמש: todoNag/<uid> = { mode: 'all'|'urgent'|'off', every: 5|10|15|30 }  (ברירת מחדל: כל המשימות, כל 5 דקות)
+  // ---------- הגדרות תזכורות אישיות (todoNag/<uid>) ----------
+  //   eve / eveTime  - "יום לפני" בשעה שבוחרים (ברירת מחדל 20:00)
+  //   at             - בשעת המשימה
+  //   before         - עד 3 תזכורות לפני המשימה, בדקות (10/15/30/60/120/1440 - כמו ביומן)
+  //   mode/every/max - נודניק: משימה עם שעה שלא בוצעה מזכירה שוב כל X דקות, עד Y פעמים (ברירת מחדל: כבוי)
+  //   calAlert       - צלצול גם מאירוע היומן (Google/סמסונג). כבוי = תזכורת רק מתכל׳ס, בלי כפילויות
   // בהתראה: כפתורי "✅ בוצע" ו"⏰ עוד 30 דק׳" - עובדים בלי לפתוח את האפליקציה (טוקן חתום למשימה)
-  const NAG_DEFAULT = { mode: 'all', every: 5 };
+  const NAG_DEFAULT = { mode: 'off', every: 30, max: 3, eve: true, eveTime: '20:00', at: true, before: [], calAlert: false };
+  const BEFORE_OPTS = [10, 15, 30, 60, 120, 1440], EVERY_OPTS = [5, 10, 15, 30, 60, 120], MAX_OPTS = [1, 2, 3, 5, 10, 0];
   const NAG_WINDOW_MS = 24 * 3600 * 1000, NAG_MAX = 120;
   const crypto = require('crypto');
   const nagSecret = crypto.createHash('sha256').update(String(process.env.FIREBASE_KEY || '') + '|tasks-nag').digest();
@@ -320,13 +325,22 @@ function register(app, admin, db, express) {
       if (!d) return res.status(401).json({ error: 'אין הרשאה' });
       const ref = db.ref(`todoNag/${d.uid}`);
       const b = req.body || {};
-      if (b.mode !== undefined || b.every !== undefined) {
-        const upd = {};
-        if (['all', 'urgent', 'off'].includes(b.mode)) upd.mode = b.mode;
-        if ([5, 10, 15, 30].includes(Number(b.every))) upd.every = Number(b.every);
-        await ref.update(upd);
-      }
-      res.json({ ok: true, ...NAG_DEFAULT, ...((await ref.once('value')).val() || {}) });
+      const upd = {};
+      if (['all', 'urgent', 'off'].includes(b.mode)) upd.mode = b.mode;
+      if (EVERY_OPTS.includes(Number(b.every))) upd.every = Number(b.every);
+      if (b.max !== undefined && MAX_OPTS.includes(Number(b.max))) upd.max = Number(b.max);
+      if (b.eve !== undefined) upd.eve = !!b.eve;
+      if (/^([01]\d|2[0-3]):[0-5]\d$/.test(String(b.eveTime || ''))) upd.eveTime = b.eveTime;
+      if (b.at !== undefined) upd.at = !!b.at;
+      if (Array.isArray(b.before)) upd.before = [...new Set(b.before.map(Number).filter((m) => BEFORE_OPTS.includes(m)))].slice(0, 3);
+      if (b.calAlert !== undefined) upd.calAlert = !!b.calAlert;
+      const prev = (await ref.once('value')).val() || {};
+      if (Object.keys(upd).length) await ref.update(upd);
+      // שינוי "צלצול גם מהיומן" - מעדכנים גם את האירועים הקיימים ביומן (ברקע)
+      if (upd.calAlert !== undefined && upd.calAlert !== !!prev.calAlert && module.exports.patchCalAlerts) module.exports.patchCalAlerts(d.uid, upd.calAlert).catch(() => {});
+      const cur = { ...NAG_DEFAULT, ...prev, ...upd };
+      if (!Array.isArray(cur.before)) cur.before = [];
+      res.json({ ok: true, ...cur });
     } catch (err) {
       res.status(500).json({ error: 'שגיאת שרת' });
     }
@@ -361,40 +375,55 @@ function register(app, admin, db, express) {
   // uids = מי מקבל את התזכורת (משתמש אחד ברשימה פרטית, כל החברים ברשימה משותפת)
   async function checkUser(uids, tasksPath, tasks, now, prefix, nagCfg) {
     if (!Array.isArray(uids)) uids = [uids];
-    const send = async (title, body, id) => { for (const u of uids) await sendToUser(u, title, body, id); };
+    const label = (m) => (m >= 1440 ? (m / 1440 === 1 ? 'מחר' : 'בעוד ' + m / 1440 + ' ימים') : m >= 60 ? 'בעוד ' + (m === 60 ? 'שעה' : m === 120 ? 'שעתיים' : m / 60 + ' שעות') : 'בעוד ' + m + ' דק׳');
     for (const [id, t] of Object.entries(tasks || {})) {
       if (!t || t.done || !t.date || !SAFE.test(id)) continue;
       const k = t.date + '|' + (t.time || '');
       const rem = t.rem && t.rem.k === k ? t.rem : { k };
-      const upd = {};
-
+      const per = { ...(rem.u || {}) };
+      let changed = false;
       const [y, mo, d] = t.date.split('-').map(Number);
-      const prev = new Date(Date.UTC(y, mo - 1, d - 1));
-      const eveAt = ilTime(prev.toISOString().slice(0, 10), '20:00');
+      const prevDay = new Date(Date.UTC(y, mo - 1, d - 1)).toISOString().slice(0, 10);
       const taskAt = t.time ? ilTime(t.date, t.time) : NaN;
-
-      // ערב לפני - רק אם המשימה נוצרה לפני 20:00 של ערב קודם (לא שולחים "תזכורת למחר" על משימה שנוספה עכשיו להיום)
-      if (!rem.eve && now >= eveAt && now - eveAt < MAX_LATE_MS && (!t.created || t.created < eveAt)) {
-        upd.eve = true;
-        await send('📋 תזכורת למחר: ' + (prefix || '') + t.name, 'מחר' + (t.time ? ' בשעה ' + t.time : ''), id);
-      }
       const act = { act: signTask(tasksPath, id) };
-      if (t.time && !rem.at && now >= taskAt && now - taskAt < MAX_LATE_MS) {
-        upd.at = true; upd.atAt = now;
-        for (const u of uids) await sendToUser(u, '⏰ הגיע הזמן: ' + (prefix || '') + t.name, 'עכשיו - ' + t.time, id, act);
-      }
       // נודניק: ברשימה משותפת - רק למי שהמשימה באחריותו; ברשימה פרטית - לבעלים
       const nagTo = t.who && t.who.uid && uids.includes(t.who.uid) ? [t.who.uid] : (uids.length === 1 ? uids : []);
-      const cfg = { ...NAG_DEFAULT, ...((nagCfg || {})[nagTo[0]] || {}) };
-      const lastNag = rem.nagAt || rem.atAt || taskAt;
-      if (t.time && rem.at && !upd.at && nagTo.length && cfg.mode !== 'off' && (cfg.mode !== 'urgent' || t.pri === 'high')
-          && now - taskAt < NAG_WINDOW_MS && (rem.nagN || 0) < NAG_MAX && now >= (rem.snooze || 0)
-          && now - lastNag >= cfg.every * 60000 && !quiet(now)) {
-        upd.nagAt = now; upd.nagN = (rem.nagN || 0) + 1;
-        const mins = Math.round((now - taskAt) / 60000);
-        for (const u of nagTo) await sendToUser(u, '🔁 עדיין לא בוצע: ' + (prefix || '') + t.name, 'נקבע ל-' + t.time + ' (לפני ' + (mins < 60 ? mins + ' דק׳' : Math.round(mins / 60) + ' שע׳') + '). סמן ✅ בוצע כדי להפסיק', id, act);
+      for (const u of uids) {
+        const cfg = { ...NAG_DEFAULT, ...((nagCfg || {})[u] || {}) };
+        const st = { ...(per[u] || {}) };
+        const fresh = (at) => now >= at && now - at < MAX_LATE_MS && (!t.created || t.created < at); // לא שולחים על משימה שנוספה אחרי מועד התזכורת
+        // יום לפני, בשעה שבחר המשתמש (רמה ישנה: rem.eve = נשלח כבר לכולם)
+        const eveAt = ilTime(prevDay, cfg.eveTime || '20:00');
+        if (cfg.eve && !st.eve && !rem.eve && fresh(eveAt)) {
+          st.eve = 1;
+          await sendToUser(u, '📋 תזכורת למחר: ' + (prefix || '') + t.name, 'מחר' + (t.time ? ' בשעה ' + t.time : ''), id);
+        }
+        // לפני המשימה - כמו ביומן (רק למשימות עם שעה)
+        if (t.time) for (const m of (Array.isArray(cfg.before) ? cfg.before : [])) {
+          const at = taskAt - m * 60000;
+          if (!st['b' + m] && fresh(at) && now < taskAt) {
+            st['b' + m] = 1;
+            await sendToUser(u, '⏳ ' + label(m) + ': ' + (prefix || '') + t.name, (m >= 1440 ? 'מחר ' : 'היום ') + 'בשעה ' + t.time, id);
+          }
+        }
+        // בשעת המשימה
+        if (t.time && cfg.at && !st.at && !rem.at && now >= taskAt && now - taskAt < MAX_LATE_MS) {
+          st.at = 1; st.atAt = now;
+          await sendToUser(u, '⏰ הגיע הזמן: ' + (prefix || '') + t.name, 'עכשיו - ' + t.time, id, act);
+        }
+        // נודניק
+        const maxN = cfg.max ? cfg.max : NAG_MAX;
+        const lastNag = st.nagAt || st.atAt || rem.atAt || taskAt;
+        if (t.time && nagTo.includes(u) && cfg.mode !== 'off' && (cfg.mode !== 'urgent' || t.pri === 'high')
+            && now >= taskAt && now - taskAt < NAG_WINDOW_MS && (st.nagN || 0) < maxN && now >= (rem.snooze || 0)
+            && now - lastNag >= (cfg.every || 30) * 60000 && !quiet(now)) {
+          st.nagAt = now; st.nagN = (st.nagN || 0) + 1;
+          const mins = Math.round((now - taskAt) / 60000);
+          await sendToUser(u, '🔁 עדיין לא בוצע: ' + (prefix || '') + t.name, 'נקבע ל-' + t.time + ' (לפני ' + (mins < 60 ? mins + ' דק׳' : Math.round(mins / 60) + ' שע׳') + '). סמן ✅ בוצע כדי להפסיק', id, act);
+        }
+        if (JSON.stringify(st) !== JSON.stringify(per[u] || {})) { per[u] = st; changed = true; }
       }
-      if (Object.keys(upd).length) await db.ref(`${tasksPath}/${id}/rem`).set({ ...rem, ...upd });
+      if (changed) await db.ref(`${tasksPath}/${id}/rem`).set({ ...rem, u: per });
     }
   }
 

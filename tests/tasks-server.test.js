@@ -71,7 +71,7 @@ test('מנויים: תקופת הרצה (חינם) מול מצב בתשלום', 
 // ---------- תזכורות + נודניק ----------
 test('תזכורות: בשעת המשימה, בלי כפילות, ונודניק אחרי 5 דקות', async () => {
   const t = ilAgo(10);
-  const db = fakeDb({ todoPushTokens: { 'staff-tasks': { d1: { token: 'T' } } },
+  const db = fakeDb({ todoPushTokens: { 'staff-tasks': { d1: { token: 'T' } } }, todoNag: { 'staff-tasks': { mode: 'all', every: 5 } },
     todo: { tasks: { t1: { id: 't1', name: 'להזמין קולה', date: t.date, time: t.time, done: false, created: Date.now() - 864e5 } } } });
   const admin = fakeAdmin({});
   const { timers } = load(['taskReminders', 'tasksAccess'], db, admin);
@@ -84,7 +84,7 @@ test('תזכורות: בשעת המשימה, בלי כפילות, ונודניק
   await tick();
   assert.equal(admin.sent.length, 0, 'לא שולח שוב');
 
-  db.store.todo.tasks.t1.rem.atAt = Date.now() - 6 * 60000;
+  db.store.todo.tasks.t1.rem.u['staff-tasks'].atAt = Date.now() - 6 * 60000;
   await tick();
   if (quietNow()) assert.equal(admin.sent.length, 0, 'שעות שקט');
   else assert.match(admin.sent[0].title, /^🔁 עדיין לא בוצע/);
@@ -103,7 +103,7 @@ test('נודניק: "עוד 30 דק׳", "בוצע" (כולל משימה חוזר
   assert.equal((await call('POST', '/tasks/nag/act', { body: { t: act, a: 'snooze' } })).body.ok, true);
   assert.ok(db.store.todo.tasks.t1.rem.snooze > Date.now() + 25 * 60000);
   admin.sent.length = 0;
-  db.store.todo.tasks.t1.rem.atAt = Date.now() - 6 * 60000;
+  db.store.todo.tasks.t1.rem.u['staff-tasks'].atAt = Date.now() - 6 * 60000;
   await tick();
   assert.equal(admin.sent.length, 0, 'נדחה – לא מציק');
 
@@ -115,7 +115,8 @@ test('נודניק: "עוד 30 דק׳", "בוצע" (כולל משימה חוזר
   const forged = act.split('.')[0] + '.' + 'A'.repeat(32);
   assert.equal((await call('POST', '/tasks/nag/act', { body: { t: forged, a: 'done' } })).status, 400);
 
-  assert.equal((await call('POST', '/tasks/nag/settings', { token: 'r' })).body.every, 5, 'ברירת מחדל: כל 5 דקות');
+  const def = (await call('POST', '/tasks/nag/settings', { token: 'r' })).body;
+  assert.equal(def.mode, 'off', 'ברירת מחדל: נודניק כבוי'); assert.equal(def.every, 30); assert.equal(def.eveTime, '20:00');
   const s = await call('POST', '/tasks/nag/settings', { token: 'r', body: { mode: 'urgent', every: 15 } });
   assert.equal(s.body.mode, 'urgent'); assert.equal(s.body.every, 15);
   assert.equal((await call('POST', '/tasks/nag/settings', { token: 'r', body: { every: 7 } })).body.every, 15, 'ערך לא חוקי נדחה');
@@ -417,4 +418,23 @@ test('הסכמה: כבוי - אף אחד לא נחסם; פעיל - משתמש ק
   assert.equal(Object.keys(db.get('todoConsentLog/u1')).length, 2, 'היסטוריית הסכמות');
   const list = (await call('POST', '/tasks/access/list', { token: 'r' })).body.users;
   assert.equal(list.find((x) => x.uid === 'u1').consent.termsV, '1.0');
+});
+
+test('תזכורות אישיות: "לפני המשימה" כמו ביומן, הגדרות "יום לפני", נודניק מוגבל, ערכים לא חוקיים נדחים', async () => {
+  const soon = ilAgo(-25); // משימה בעוד 25 דקות
+  const db = fakeDb({ todoPushTokens: { a: { d: { token: 'A' } }, b: { d: { token: 'B' } } },
+    todoNag: { a: { before: [30], at: true }, b: { before: [], eve: false } },
+    todo: { users: { a: { tasks: { t1: { name: 'פגישה', date: soon.date, time: soon.time, created: Date.now() - 864e5 } } }, b: { tasks: { t2: { name: 'שקט', date: soon.date, time: soon.time, created: Date.now() - 864e5 } } } } } });
+  const admin = fakeAdmin({});
+  const { timers, call } = load(['taskReminders', 'tasksAccess'], db, admin);
+  const tick = timers.find((x) => x.kind === 'interval' && x.ms === 60000).f;
+  await tick();
+  const toA = admin.sent.filter((m) => m.tokens.includes('A')), toB = admin.sent.filter((m) => m.tokens.includes('B'));
+  assert.equal(toA.length, 1); assert.match(toA[0].title, /^⏳ בעוד 30 דק׳: פגישה/);
+  assert.equal(toB.length, 0, 'בלי "לפני" - לא נשלח כלום מראש');
+  admin.sent.length = 0; await tick(); assert.equal(admin.sent.length, 0, 'לא חוזר');
+  admin.tokens.a = { uid: 'a' };
+  const s = (await call('POST', '/tasks/nag/settings', { token: 'a', body: { before: [1440, 30, 999, 60, 10], eveTime: '09:30', every: 60, max: 2, calAlert: true } })).body;
+  assert.deepEqual(s.before, [1440, 30, 60], 'עד 3, רק ערכים חוקיים'); assert.equal(s.eveTime, '09:30'); assert.equal(s.every, 60); assert.equal(s.max, 2); assert.equal(s.calAlert, true);
+  assert.equal((await call('POST', '/tasks/nag/settings', { token: 'a', body: { eveTime: '25:00' } })).body.eveTime, '09:30', 'שעה לא חוקית נדחית');
 });
