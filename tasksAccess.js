@@ -49,6 +49,7 @@ function register(app, admin, db, express) {
     locked: !!a.locked, pending: !!a.pending, plan: a.plan || 'trial', until: a.until == null ? null : a.until,
     daysLeft: (a.until == null || cfg.freeMode) ? null : Math.max(0, Math.ceil((a.until - now) / DAY)),
     kind: a.kind || '', ...planOf(a, cfg), contact: cfg.contact,
+    orgReq: a.pending && a.orgReq && a.orgReq.name ? String(a.orgReq.name) : undefined,
   });
   async function ensure(uid, info, created) {
     const ref = db.ref(`todoAccess/users/${uid}`);

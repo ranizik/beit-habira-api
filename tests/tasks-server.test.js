@@ -466,8 +466,22 @@ test('ארגון: בקשה, אישור, עובדים, רשימות, דוח, הס
   const [oid, tok] = link.split('?org=')[1].split('.');
   assert.equal((await call('POST', '/tasks/org/join', { token: 'w2', body: { orgId: oid, token: 'bad' } })).body.ok, false);
   db.ref('todoAccess/users/w2').set({ pending: true, name: 'רון' }); // משתמש חדש שממתין לאישור
-  assert.equal((await call('POST', '/tasks/org/join', { token: 'w2', body: { orgId: oid, token: tok } })).body.ok, true);
-  assert.ok(!db.get('todoAccess/users/w2/pending') && db.get('todoAccess/users/w2/until') > Date.now(), 'הצטרפות לארגון מאשרת את העובד');
+  r = await call('POST', '/tasks/org/join', { token: 'w2', body: { orgId: oid, token: tok } });
+  assert.equal(r.body.pending, true, 'קישור = בקשה, לא הצטרפות מיידית');
+  assert.equal(db.get(`todoOrgs/${orgId}/members/w2`), undefined);
+  assert.equal(db.get('todoAccess/users/w2/orgReq/name'), 'פיצה דנה');
+  assert.ok(admin.sent.some((m) => m.title.includes('🙋')), 'המנהל מקבל התראה');
+  r = await call('POST', '/tasks/org/mine', { token: 'b' });
+  assert.deepEqual(r.body.requests.map((x) => x.uid), ['w2']);
+  assert.equal((await call('POST', '/tasks/org/approve', { token: 'w1', body: { uid: 'w2', approve: true } })).status, 403, 'עובד לא מאשר');
+  assert.equal((await call('POST', '/tasks/org/approve', { token: 'b', body: { uid: 'w2', approve: true } })).body.ok, true);
+  assert.ok(db.get(`todoOrgs/${orgId}/members/w2`) && !db.get(`todoOrgs/${orgId}/requests/w2`));
+  assert.ok(!db.get('todoAccess/users/w2/pending') && db.get('todoAccess/users/w2/until') > Date.now(), 'אישור המנהל פותח את האפליקציה');
+  // דחייה
+  await call('POST', '/tasks/org/join', { token: 'x', body: { orgId: oid, token: tok } });
+  assert.equal((await call('POST', '/tasks/org/approve', { token: 'b', body: { uid: 'x', approve: false } })).body.rejected, true);
+  assert.equal(db.get(`todoOrgs/${orgId}/members/x`), undefined);
+  assert.equal(db.get(`todoOrgs/${orgId}/requests/x`), undefined);
   assert.equal((await call('POST', '/tasks/org/invite', { token: 'w1' })).status, 403, 'עובד לא מזמין');
 
   r = await call('POST', '/tasks/org/list-create', { token: 'b', body: { name: 'משמרת ערב', members: ['w1', 'x'] } });

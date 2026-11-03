@@ -103,7 +103,8 @@ function register(app, admin, db, express) {
       .sort((a, b) => ROLES.indexOf(a.role) - ROLES.indexOf(b.role) || String(a.name).localeCompare(String(b.name), 'he'));
     const lists = (await orgLists(id)).filter(({ l }) => isMgr(role) || (l.members && l.members[d.uid]))
       .map(({ id: lid, l }) => ({ id: lid, name: l.name, members: Object.keys(l.members || {}) }));
-    res.json({ ...base, members, lists, limit: isMgr(role) ? await limitFor(org) : undefined });
+    const requests = isMgr(role) ? Object.entries(org.requests || {}).filter(([u]) => SAFE.test(u)).map(([uid, x]) => ({ uid, name: x.name || '', email: x.email || '', at: x.at || null })).sort((a, b) => (a.at || 0) - (b.at || 0)) : undefined;
+    res.json({ ...base, members, lists, requests, limit: isMgr(role) ? await limitFor(org) : undefined });
   });
 
   route('/tasks/org/request', async (req, res, d, b) => {
@@ -177,16 +178,40 @@ function register(app, admin, db, express) {
     res.json({ ok: true, link: require('./tasksAdmin').APP_URL + '?org=' + m.id + '.' + m.org.invite });
   });
 
+  // קישור הזמנה = בקשת הצטרפות; בעלים/מנהל מאשרים
   route('/tasks/org/join', async (req, res, d, b) => {
     const org = await getOrg(b.orgId);
     if (!org || org.status !== 'active' || !b.token || String(b.token) !== String(org.invite)) return res.json({ ok: false, error: 'הקישור לא תקף' });
     if (org.members && org.members[d.uid]) return res.json({ ok: true, already: true, name: org.name });
     const cur = await myOrg(d.uid);
     if (cur && cur.org.status !== 'rejected') return res.json({ ok: false, error: 'אתה כבר חבר בארגון אחר' });
-    if (Object.keys(org.members || {}).length >= await limitFor(org)) return res.json({ ok: false, error: 'הארגון מלא – פנה למנהל' });
-    await addMember({ id: b.orgId, org }, d.uid, nameOf(d), d.uid, nameOf(d));
-    await push(org.owner, '🏢 ' + U(org.name), U(nameOf(d)) + ' הצטרף/ה לארגון בקישור');
-    res.json({ ok: true, name: org.name });
+    if (org.requests && org.requests[d.uid]) return res.json({ ok: true, pending: true, name: org.name });
+    if (Object.keys(org.requests || {}).length >= 100) return res.json({ ok: false, error: 'יותר מדי בקשות ממתינות – פנה למנהל' });
+    const nm = nameOf(d);
+    await db.ref(`todoOrgs/${b.orgId}/requests/${d.uid}`).set({ name: nm, email: d.email || '', at: Date.now() });
+    const acc = (await db.ref(`todoAccess/users/${d.uid}`).once('value')).val();
+    if (acc && acc.pending) await db.ref(`todoAccess/users/${d.uid}/orgReq`).set({ id: b.orgId, name: org.name });
+    for (const [u, x] of Object.entries(org.members || {})) if (x && isMgr(x.role)) await push(u, '🙋 ' + U(org.name), U(nm) + (d.email ? ' (' + d.email + ')' : '') + ' מבקש/ת להצטרף. לאשר? ☰ ← לעסקים');
+    res.json({ ok: true, pending: true, name: org.name });
+  });
+
+  route('/tasks/org/approve', async (req, res, d, b) => {
+    const m = await mgr(d, res); if (!m) return;
+    const uid = String(b.uid || '');
+    const rq = SAFE.test(uid) && m.org.requests && m.org.requests[uid];
+    if (!rq) return res.json({ ok: false, error: 'הבקשה לא נמצאה' });
+    const done = async () => { await db.ref(`todoOrgs/${m.id}/requests/${uid}`).remove(); await db.ref(`todoAccess/users/${uid}/orgReq`).remove(); };
+    if (!b.approve) {
+      await done();
+      await push(uid, '🏢 ' + U(m.org.name), 'הבקשה להצטרף לארגון לא אושרה');
+      return res.json({ ok: true, rejected: true });
+    }
+    const cur = await myOrg(uid);
+    if (cur && cur.org.status !== 'rejected') { await done(); return res.json({ ok: false, error: 'המשתמש כבר חבר בארגון אחר' }); }
+    if (Object.keys(m.org.members || {}).length >= await limitFor(m.org)) return res.json({ ok: false, error: 'הגעת למספר העובדים במסלול. להגדלה – פנה לרני.' });
+    await done();
+    await addMember(m, uid, rq.name, d.uid, nameOf(d));
+    res.json({ ok: true, name: rq.name });
   });
 
   route('/tasks/org/add', async (req, res, d, b) => {

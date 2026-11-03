@@ -25,6 +25,8 @@ const P = [
   ['✅ תכל׳ס נפתחה', '✅ Tachles is open again', '✅ تم فتح Tachles', '✅ Tachles снова доступен', '✅ Tachles est de nouveau ouvert', '✅ Tachles está abierta de nuevo'],
   ['). סמן ✅ בוצע כדי להפסיק', '). Tap ✅ Done to stop', '). اضغط ✅ تم للإيقاف', '). Нажмите ✅ Выполнено, чтобы остановить', '). Appuyez sur ✅ Fait pour arrêter', '). Pulsa ✅ Hecha para parar'],
   ['הבקשה לארגון לא אושרה', 'The organization request was not approved', 'لم تتم الموافقة على طلب المؤسسة', 'Запрос на организацию не одобрен', 'La demande d\'organisation n\'a pas été approuvée', 'La solicitud de organización no fue aprobada'],
+  [' מבקש/ת להצטרף. לאשר? ☰ ← לעסקים', ' asks to join. Approve? ☰ → Business', ' يطلب/تطلب الانضمام. موافقة؟ ☰ ← للأعمال', ' просит вступить. Одобрить? ☰ → Бизнес', ' demande à rejoindre. Approuver ? ☰ → Entreprise', ' pide unirse. ¿Aprobar? ☰ → Empresas'],
+  ['הבקשה להצטרף לארגון לא אושרה', 'Your request to join the organization was declined', 'لم تتم الموافقة على طلب الانضمام إلى المؤسسة', 'Запрос на вступление в организацию отклонён', 'Votre demande pour rejoindre l\'organisation a été refusée', 'Tu solicitud para unirte a la organización fue rechazada'],
   [' הצטרף/ה לארגון בקישור', ' joined the organization via link', ' انضم/ت إلى المؤسسة عبر رابط', ' вступил(а) в организацию по ссылке', ' a rejoint l\'organisation par lien', ' se unió a la organización por enlace'],
   [' צירף/ה אותך לרשימה', ' added you to the list', ' أضافك إلى القائمة', ' добавил(а) вас в список', ' vous a ajouté à la liste', ' te añadió a la lista'],
   [' – צורפת לרשימה', ' – you were added to a list', ' – تمت إضافتك إلى قائمة', ' — вас добавили в список', ' – vous avez été ajouté à une liste', ' – te añadieron a una lista'],
