@@ -235,6 +235,16 @@ function register(app, admin, db, express) {
     res.json({ ok: true });
   });
 
+  // שינוי שם הארגון (בעל הארגון בלבד)
+  route('/tasks/org/rename', async (req, res, d, b) => {
+    const m = await myOrg(d.uid);
+    if (!m || m.role !== 'owner' || m.org.status !== 'active') return res.status(403).json({ error: 'רק לבעל הארגון' });
+    const name = String(b.name || '').trim().slice(0, 60);
+    if (name.length < 2) return res.status(400).json({ error: 'כתוב את שם העסק' });
+    await db.ref(`todoOrgs/${m.id}/name`).set(name);
+    res.json({ ok: true, name });
+  });
+
   // ---------- רשימות ארגון ----------
   const pick = (m, arr) => [...new Set((Array.isArray(arr) ? arr : []).filter((u) => SAFE.test(String(u)) && m.org.members && m.org.members[u]))].slice(0, 200);
 
@@ -284,6 +294,16 @@ function register(app, admin, db, express) {
       moved += await removeFromList(b.listId, fresh, u, d.uid, myName, me);
     }
     res.json({ ok: true, added, moved });
+  });
+
+  route('/tasks/org/list-rename', async (req, res, d, b) => {
+    const m = await mgr(d, res); if (!m) return;
+    const l = await orgList(m, b.listId, res); if (!l) return;
+    const name = String(b.name || '').trim().slice(0, 40);
+    if (!name) return res.status(400).json({ error: 'חסר שם לרשימה' });
+    await db.ref(`todo/shared/${b.listId}/name`).set(name);
+    await logList(b.listId, { type: 'rename', uid: d.uid, name: nameOf(d), to: name });
+    res.json({ ok: true, name });
   });
 
   route('/tasks/org/list-delete', async (req, res, d, b) => {

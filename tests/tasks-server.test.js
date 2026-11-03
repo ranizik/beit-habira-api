@@ -515,6 +515,12 @@ test('ארגון: בקשה, אישור, עובדים, רשימות, דוח, הס
 
   // אחרי הסרה – העובד יכול לצאת מרשימות שנשארו לו (לא רלוונטי) ואין לו ארגון
   assert.equal((await call('POST', '/tasks/org/mine', { token: 'w1' })).body.org, null);
+  // שינוי שם: ארגון – בעלים בלבד; רשימה – מנהל
+  assert.equal((await call('POST', '/tasks/org/rename', { token: 'w2', body: { name: 'אחר' } })).status, 403);
+  assert.equal((await call('POST', '/tasks/org/rename', { token: 'b', body: { name: 'בית הבירה' } })).body.ok, true);
+  assert.equal(db.get(`todoOrgs/${orgId}/name`), 'בית הבירה');
+  assert.equal((await call('POST', '/tasks/org/list-rename', { token: 'w2', body: { listId, name: 'בוקר' } })).body.ok, true);
+  assert.equal(db.get(`todo/shared/${listId}/name`), 'בוקר');
   // מחיקת רשימה – בעלים בלבד
   assert.equal((await call('POST', '/tasks/org/list-delete', { token: 'w2', body: { listId } })).status, 403);
   assert.equal((await call('POST', '/tasks/org/list-delete', { token: 'b', body: { listId } })).body.ok, true);
