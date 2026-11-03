@@ -923,6 +923,7 @@ require('./tasksGuest').register(app, admin, db, express);
 require('./tasksAdmin').register(app, admin, db, express);
 // גיבוי לילי של נתוני תכל׳ס (30 יום אחורה)
 require('./tasksBackup').register(app, admin, db, express);
+require('./tasksOrg').register(app, admin, db, express);
 
 // ---------- Middleware אימות לכל שאר הנתיבים ----------
 app.use(requireApiKey);

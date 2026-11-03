@@ -438,3 +438,85 @@ test('תזכורות אישיות: "לפני המשימה" כמו ביומן, ה
   assert.deepEqual(s.before, [1440, 30, 60], 'עד 3, רק ערכים חוקיים'); assert.equal(s.eveTime, '09:30'); assert.equal(s.every, 60); assert.equal(s.max, 2); assert.equal(s.calAlert, true);
   assert.equal((await call('POST', '/tasks/nag/settings', { token: 'a', body: { eveTime: '25:00' } })).body.eveTime, '09:30', 'שעה לא חוקית נדחית');
 });
+
+// ---------- ארגונים (תכל׳ס לעסקים) ----------
+test('ארגון: בקשה, אישור, עובדים, רשימות, דוח, הסרה עם העברת משימות', async () => {
+  const db = fakeDb({ todoPushTokens: { 'staff-tasks': { d: { token: 'O' } }, boss: { d: { token: 'B' } }, w1: { d: { token: 'W' } } } });
+  const admin = fakeAdmin({ boss: { name: 'דנה', email: 'boss@x.com' }, w1: { name: 'יוסי', email: 'w1@x.com' }, w2: { name: 'רון', email: 'w2@x.com' }, x: { name: 'זר', email: 'x@x.com' } });
+  admin.tokens.b = { uid: 'boss', name: 'דנה', email: 'boss@x.com' };
+  admin.tokens.w1 = { uid: 'w1', name: 'יוסי' };
+  admin.tokens.w2 = { uid: 'w2', name: 'רון' };
+  admin.tokens.x = { uid: 'x', name: 'זר' };
+  admin.tokens.r = OWNER;
+  const { call } = load(['taskReminders', 'tasksAccess', 'tasksOrg'], db, admin);
+
+  let r = await call('POST', '/tasks/org/request', { token: 'b', body: { name: 'פיצה דנה' } });
+  assert.equal(r.body.status, 'pending');
+  assert.ok(admin.sent.some((m) => m.title.includes('בקשה לפתיחת ארגון')), 'רני מקבל התראה');
+  r = await call('POST', '/tasks/org/mine', { token: 'b' });
+  assert.equal(r.body.org.status, 'pending'); assert.equal(r.body.members, undefined, 'לפני אישור – בלי פרטים');
+  assert.equal((await call('POST', '/tasks/org/add', { token: 'b', body: { email: 'w1@x.com' } })).body.ok, false, 'לפני אישור אי אפשר לצרף');
+  assert.equal((await call('POST', '/tasks/org/admin-list', { token: 'b' })).status, 401);
+  const orgId = (await call('POST', '/tasks/org/admin-list', { token: 'r' })).body.orgs[0].id;
+  await call('POST', '/tasks/org/admin-set', { token: 'r', body: { orgId, action: 'approve' } });
+
+  r = await call('POST', '/tasks/org/add', { token: 'b', body: { email: 'w1@x.com' } });
+  assert.equal(r.body.ok, true);
+  const link = (await call('POST', '/tasks/org/invite', { token: 'b' })).body.link;
+  const [oid, tok] = link.split('?org=')[1].split('.');
+  assert.equal((await call('POST', '/tasks/org/join', { token: 'w2', body: { orgId: oid, token: 'bad' } })).body.ok, false);
+  assert.equal((await call('POST', '/tasks/org/join', { token: 'w2', body: { orgId: oid, token: tok } })).body.ok, true);
+  assert.equal((await call('POST', '/tasks/org/invite', { token: 'w1' })).status, 403, 'עובד לא מזמין');
+
+  r = await call('POST', '/tasks/org/list-create', { token: 'b', body: { name: 'משמרת ערב', members: ['w1', 'x'] } });
+  const listId = r.body.listId;
+  const list = db.get(`todo/shared/${listId}`);
+  assert.ok(list.members.w1 && list.members.boss && !list.members.x, 'רק חברי ארגון');
+  assert.equal(list.org, orgId);
+  assert.equal(db.get(`todo/userLists/w1/${listId}`), true);
+
+  // עובד לא מצרף ולא יוצא בעצמו, ואין הצטרפות בקישור
+  assert.equal((await call('POST', '/tasks/lists/add', { token: 'w1', body: { listId, email: 'w2@x.com' } })).body.ok, false);
+  assert.equal((await call('POST', '/tasks/lists/join', { token: 'w2', body: { listId, invite: list.invite } })).body.ok, false);
+  assert.equal((await call('POST', '/tasks/lists/leave', { token: 'w1', body: { listId } })).body.ok, false);
+  assert.ok(db.get(`todo/shared/${listId}/members/w1`), 'עדיין ברשימה');
+
+  // משימות + דוח
+  const day = new Date(Date.now() - 2 * 864e5).toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' });
+  db.ref(`todo/shared/${listId}/tasks`).set({
+    t1: { name: 'לנקות', who: { uid: 'w1', name: 'יוסי' }, date: day },
+    t2: { name: 'להזמין', who: { uid: 'w1', name: 'יוסי' } },
+    t3: { name: 'קופה', who: { uid: 'w1', name: 'יוסי' }, done: true, doneAt: Date.now() },
+    t4: { name: 'כללי' },
+  });
+  r = await call('POST', '/tasks/org/report', { token: 'b' });
+  const row = r.body.rows.find((x) => x.uid === 'w1');
+  assert.deepEqual([row.open, row.overdue, row.done7], [2, 1, 1]);
+  assert.equal(r.body.unassigned.open, 1);
+  assert.equal(row.last, undefined, 'בלי זמני כניסה');
+  assert.equal((await call('POST', '/tasks/org/report', { token: 'w1' })).status, 403);
+
+  // תפקידים: בעלים ממנה מנהל; מנהל לא מסיר מנהל
+  await call('POST', '/tasks/org/role', { token: 'b', body: { uid: 'w2', role: 'manager' } });
+  assert.equal((await call('POST', '/tasks/org/role', { token: 'w2', body: { uid: 'w1', role: 'manager' } })).status, 403);
+  assert.equal((await call('POST', '/tasks/org/report', { token: 'w2' })).body.ok, true, 'מנהל רואה דוח');
+
+  // הסרת עובד: יוצא מהרשימות, המשימות הפתוחות עוברות למנהל שהסיר
+  r = await call('POST', '/tasks/org/remove', { token: 'w2', body: { uid: 'w1' } });
+  assert.equal(r.body.moved, 2);
+  assert.equal(db.get(`todo/shared/${listId}/members/w1`), undefined);
+  assert.equal(db.get(`todo/userLists/w1/${listId}`), undefined);
+  assert.equal(db.get(`todo/shared/${listId}/tasks/t1/who/uid`), 'w2');
+  assert.equal(db.get(`todo/shared/${listId}/tasks/t3/who/uid`), 'w1', 'משימה שבוצעה נשארת כמו שהיא');
+  assert.ok(db.get(`todo/shared/${listId}/members/w2`), 'המנהל קיבל גישה לרשימה');
+  assert.equal(db.get('todoUserOrg/w1'), undefined);
+  assert.equal((await call('POST', '/tasks/org/remove', { token: 'w2', body: { uid: 'boss' } })).status, 403, 'בעלים לא מוסר');
+  assert.equal((await call('POST', '/tasks/org/leave', { token: 'b' })).body.ok, false, 'בעלים לא עוזב');
+
+  // אחרי הסרה – העובד יכול לצאת מרשימות שנשארו לו (לא רלוונטי) ואין לו ארגון
+  assert.equal((await call('POST', '/tasks/org/mine', { token: 'w1' })).body.org, null);
+  // מחיקת רשימה – בעלים בלבד
+  assert.equal((await call('POST', '/tasks/org/list-delete', { token: 'w2', body: { listId } })).status, 403);
+  assert.equal((await call('POST', '/tasks/org/list-delete', { token: 'b', body: { listId } })).body.ok, true);
+  assert.equal(db.get(`todo/shared/${listId}`), undefined);
+});

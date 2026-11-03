@@ -70,6 +70,7 @@ function register(app, admin, db, express) {
       const list = (await db.ref(`todo/shared/${listId}`).once('value')).val();
       if (!list || !list.invite || String(invite) !== String(list.invite)) return res.status(404).json({ error: 'הקישור לא תקף או שהרשימה נמחקה' });
       const already = !!(list.members && list.members[d.uid]);
+      if (!already && list.org) return res.json({ ok: false, error: 'זו רשימה של ארגון – הצירוף נעשה על ידי מנהל הארגון' });
       if (!already) {
         // מכסת משתתפים לפי המסלול של בעל הרשימה (מי שכבר ברשימה נשאר)
         const limit = await require('./tasksAccess').memberLimit(db, list.owner).catch(() => Infinity);
@@ -130,6 +131,7 @@ function register(app, admin, db, express) {
       if (!SAFE.test(String(listId || ''))) return res.status(400).json({ error: 'רשימה לא תקינה' });
       const lv = (await db.ref(`todo/shared/${listId}`).once('value')).val();
       const wasMember = !!(lv && lv.members && lv.members[d.uid]);
+      if (wasMember && lv.org && await require('./tasksOrg').orgRole(db, lv.org, d.uid)) return res.json({ ok: false, error: 'זו רשימה של ארגון – מנהל הארגון מחליט מי ברשימה' });
       await db.ref(`todo/shared/${listId}/members/${d.uid}`).remove();
       await db.ref(`todo/userLists/${d.uid}/${listId}`).remove();
       if (wasMember) {
@@ -229,6 +231,7 @@ function register(app, admin, db, express) {
       if (!SAFE.test(String(listId || ''))) return res.status(400).json({ error: 'רשימה לא תקינה' });
       const list = (await db.ref(`todo/shared/${listId}`).once('value')).val();
       if (!list || !list.members || !list.members[d.uid]) return res.status(403).json({ error: 'לא חבר ברשימה' });
+      if (list.org) return res.json({ ok: false, error: 'ברשימת ארגון – הצירוף נעשה ממסך הארגון (🏢), על ידי מנהל' });
       let target = null, tName = '';
       const contacts = await myContacts(d.uid);
       if (req.body.uid && contacts[req.body.uid]) { target = req.body.uid; tName = contacts[target].name; }
