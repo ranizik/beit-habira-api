@@ -307,7 +307,8 @@ function register(app, admin, db, express) {
       for (const t of Object.values(l.tasks || {})) {
         if (!t) continue;
         const uid = t.who && t.who.uid;
-        const late = !t.done && t.date && (t.date < today || (t.date === today && t.time && t.time < hm));
+        const R = require('./taskReminders'), z = R.validTz(t.tz); // משימה מחו״ל – לפי אזור הזמן שלה
+        const late = !t.done && t.date && (t.time ? R.ilTime(t.date, t.time, z) < now : t.date < (z ? new Date(now).toLocaleDateString('en-CA', { timeZone: z }) : today));
         const row = uid && per[uid];
         if (!row) { if (!t.done) { unassigned.open++; if (late) unassigned.overdue++; } continue; }
         const lr = row.lists[id] = row.lists[id] || { name: l.name, open: 0, overdue: 0, done7: 0 };

@@ -199,8 +199,9 @@ function register(app, admin, db, express) {
     else body.colorId = '9';
     if (timed) {
       const e = addMinutes(t.date, t.time, 30);
-      body.start = { dateTime: t.date + 'T' + t.time + ':00', timeZone: TZ };
-      body.end = { dateTime: e.date + 'T' + e.time + ':00', timeZone: TZ };
+      const tz = require('./taskReminders').validTz(t.tz) || TZ; // אזור הזמן של המשימה (לקוחות בחו״ל)
+      body.start = { dateTime: t.date + 'T' + t.time + ':00', timeZone: tz };
+      body.end = { dateTime: e.date + 'T' + e.time + ':00', timeZone: tz };
     } else {
       const e = addMinutes(t.date, '00:00', 24 * 60);
       body.start = { date: t.date }; body.end = { date: e.date };

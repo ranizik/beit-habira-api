@@ -546,3 +546,13 @@ test('שפה: /tasks/prefs נשמר, וההתראות מתורגמות בלי ל
   assert.equal(m.body, 'Now - 10:00');
   assert.equal(m.data.l1, '✅ Done');
 });
+
+test('אזור זמן: משימה של לקוח בניו יורק מתוזמנת לפי השעה שלו', () => {
+  const { ilTime, validTz } = require('../taskReminders');
+  assert.equal(validTz('America/New_York'), 'America/New_York');
+  assert.equal(validTz('Mars/Base'), null);
+  // 3 בנובמבר 2026: ניו יורק UTC-5, ישראל UTC+2
+  assert.equal(new Date(ilTime('2026-11-03', '10:00', 'America/New_York')).toISOString(), '2026-11-03T15:00:00.000Z');
+  assert.equal(new Date(ilTime('2026-11-03', '10:00')).toISOString(), '2026-11-03T08:00:00.000Z', 'ברירת מחדל: ישראל');
+  assert.equal(new Date(ilTime('2026-07-01', '10:00', 'America/Los_Angeles')).toISOString(), '2026-07-01T17:00:00.000Z', 'שעון קיץ');
+});

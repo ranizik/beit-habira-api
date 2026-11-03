@@ -10,14 +10,17 @@ const TZ = 'Asia/Jerusalem';
 const SAFE = /^[-_A-Za-z0-9]{1,128}$/;
 const MAX_LATE_MS = 6 * 60 * 60 * 1000; // לא שולחים תזכורת שאיחרה ביותר מ-6 שעות (למשל אחרי השבתה ארוכה)
 
-// שעה מקומית בישראל -> זמן אמיתי (UTC ms), כולל שעון קיץ/חורף
-function ilTime(dateStr, timeStr) {
+// אזור זמן תקין (למשל America/New_York) או null
+const validTz = (z) => { if (!z || typeof z !== 'string' || z.length > 64) return null; try { new Intl.DateTimeFormat('en-US', { timeZone: z }); return z; } catch (e) { return null; } };
+// שעה מקומית באזור הזמן (ברירת מחדל: ישראל) -> זמן אמיתי (UTC ms), כולל שעון קיץ/חורף
+function ilTime(dateStr, timeStr, zone) {
+  const tz = validTz(zone) || TZ;
   const [y, mo, d] = String(dateStr).split('-').map(Number);
   const [h, mi] = String(timeStr || '00:00').split(':').map(Number);
   if (!y || !mo || !d || isNaN(h) || isNaN(mi)) return NaN;
   const guess = Date.UTC(y, mo - 1, d, h, mi);
   const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
-    timeZone: TZ, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
   }).formatToParts(new Date(guess)).map((p) => [p.type, p.value]));
   const asIL = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute);
   return guess - (asIL - guess);
@@ -283,28 +286,29 @@ function register(app, admin, db, express) {
     try {
       const d = await authUser(req);
       if (!d) return res.status(401).json({ error: 'אין הרשאה' });
-      const lang = (req.body || {}).lang;
-      if (lang !== undefined) {
-        if (!LANGS.includes(lang)) return res.status(400).json({ error: 'שפה לא נתמכת' });
-        await db.ref(`todoPrefs/${d.uid}/lang`).set(lang);
-        langCache[d.uid] = { lang, at: Date.now() };
-        return res.json({ ok: true, lang });
-      }
-      const v = (await db.ref(`todoPrefs/${d.uid}/lang`).once('value')).val();
-      res.json({ ok: true, lang: LANGS.includes(v) ? v : null });
+      const { lang, tz } = req.body || {};
+      if (lang !== undefined && !LANGS.includes(lang)) return res.status(400).json({ error: 'שפה לא נתמכת' });
+      if (tz !== undefined && !validTz(tz)) return res.status(400).json({ error: 'אזור זמן לא תקין' });
+      if (lang !== undefined) await db.ref(`todoPrefs/${d.uid}/lang`).set(lang);
+      if (tz !== undefined) await db.ref(`todoPrefs/${d.uid}/tz`).set(tz);
+      delete langCache[d.uid];
+      const v = (await db.ref(`todoPrefs/${d.uid}`).once('value')).val() || {};
+      res.json({ ok: true, lang: LANGS.includes(v.lang) ? v.lang : null, tz: validTz(v.tz) });
     } catch (err) {
       console.error('POST /tasks/prefs error:', err.message);
       res.status(500).json({ error: 'שגיאת שרת' });
     }
   });
-  async function userLang(uid) {
+  async function userPrefs(uid) {
     const c = langCache[uid];
-    if (c && Date.now() - c.at < 10 * 60000) return c.lang;
-    const v = (await db.ref(`todoPrefs/${uid}/lang`).once('value').catch(() => null));
-    const lang = v && LANGS.includes(v.val()) ? v.val() : 'he';
-    langCache[uid] = { lang, at: Date.now() };
-    return lang;
+    if (c && c.tzv !== undefined && Date.now() - c.at < 10 * 60000) return c;
+    const v = (SAFE.test(String(uid || '')) ? await db.ref(`todoPrefs/${uid}`).once('value').then((x) => x.val()).catch(() => null) : null) || {};
+    const r = { lang: LANGS.includes(v.lang) ? v.lang : 'he', tz: validTz(v.tz), tzv: 1, at: Date.now() };
+    langCache[uid] = r;
+    return r;
   }
+  const userLang = async (uid) => (await userPrefs(uid)).lang;
+  const userTz = async (uid) => (await userPrefs(uid)).tz;
   async function sendToUser(uid, title, body, taskId, extra) {
     const snap = await db.ref(`todoPushTokens/${uid}`).once('value');
     const entries = Object.entries(snap.val() || {}).filter(([, v]) => v && v.token);
@@ -346,8 +350,8 @@ function register(app, admin, db, express) {
   const nagSecret = crypto.createHash('sha256').update(String(process.env.FIREBASE_KEY || '') + '|tasks-nag').digest();
   const signTask = (path, id) => { const p = Buffer.from(path + '|' + id).toString('base64url'); return p + '.' + crypto.createHmac('sha256', nagSecret).update(p).digest('base64url').slice(0, 32); };
   const verifyTask = (tok) => { const [p, sig] = String(tok || '').split('.'); if (!p || !sig) return null; const exp = crypto.createHmac('sha256', nagSecret).update(p).digest('base64url').slice(0, 32); if (sig.length !== exp.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(exp))) return null; const [path, id] = Buffer.from(p, 'base64url').toString().split('|'); return /^todo\/(tasks|users\/[-_A-Za-z0-9]+\/tasks|shared\/[-_A-Za-z0-9]+\/tasks)$/.test(path) && SAFE.test(id) ? { path, id } : null; };
-  const ilHour = (ts) => Number(new Intl.DateTimeFormat('en-US', { timeZone: TZ, hourCycle: 'h23', hour: '2-digit' }).format(new Date(ts)));
-  const quiet = (ts) => { const h = ilHour(ts); return h >= 22 || h < 7; }; // לא מציקים בלילה
+  const ilHour = (ts, z) => Number(new Intl.DateTimeFormat('en-US', { timeZone: validTz(z) || TZ, hourCycle: 'h23', hour: '2-digit' }).format(new Date(ts)));
+  const quiet = (ts, z) => { const h = ilHour(ts, z); return h >= 22 || h < 7; }; // לא מציקים בלילה (לפי השעה אצל המשתמש)
   function nextRepeatDate(t) {
     const today = new Date(new Date().toLocaleDateString('en-CA', { timeZone: TZ }) + 'T00:00:00Z');
     const d = new Date((t.date || today.toISOString().slice(0, 10)) + 'T00:00:00Z');
@@ -421,7 +425,9 @@ function register(app, admin, db, express) {
       let changed = false;
       const [y, mo, d] = t.date.split('-').map(Number);
       const prevDay = new Date(Date.UTC(y, mo - 1, d - 1)).toISOString().slice(0, 10);
-      const taskAt = t.time ? ilTime(t.date, t.time) : NaN;
+      // אזור הזמן של המשימה: נשמר ביצירה (t.tz); אחרת של היוצר/הבעלים; אחרת ישראל
+      const ttz = validTz(t.tz) || await userTz(t.byUid || uids[0]) || TZ;
+      const taskAt = t.time ? ilTime(t.date, t.time, ttz) : NaN;
       const act = { act: signTask(tasksPath, id) };
       // נודניק: ברשימה משותפת - רק למי שהמשימה באחריותו; ברשימה פרטית - לבעלים
       const nagTo = t.who && t.who.uid && uids.includes(t.who.uid) ? [t.who.uid] : (uids.length === 1 ? uids : []);
@@ -430,7 +436,8 @@ function register(app, admin, db, express) {
         const st = { ...(per[u] || {}) };
         const fresh = (at) => now >= at && now - at < MAX_LATE_MS && (!t.created || t.created < at); // לא שולחים על משימה שנוספה אחרי מועד התזכורת
         // יום לפני, בשעה שבחר המשתמש (רמה ישנה: rem.eve = נשלח כבר לכולם)
-        const eveAt = ilTime(prevDay, cfg.eveTime || '20:00');
+        const utz = (await userTz(u)) || ttz;
+        const eveAt = ilTime(prevDay, cfg.eveTime || '20:00', utz);
         if (cfg.eve && !st.eve && !rem.eve && fresh(eveAt)) {
           st.eve = 1;
           await sendToUser(u, '📋 תזכורת למחר: ' + U((prefix || '') + t.name), 'מחר' + (t.time ? ' בשעה ' + t.time : ''), id);
@@ -453,7 +460,7 @@ function register(app, admin, db, express) {
         const lastNag = st.nagAt || st.atAt || rem.atAt || taskAt;
         if (t.time && nagTo.includes(u) && cfg.mode !== 'off' && (cfg.mode !== 'urgent' || t.pri === 'high')
             && now >= taskAt && now - taskAt < NAG_WINDOW_MS && (st.nagN || 0) < maxN && now >= (rem.snooze || 0)
-            && now - lastNag >= (cfg.every || 30) * 60000 && !quiet(now)) {
+            && now - lastNag >= (cfg.every || 30) * 60000 && !quiet(now, utz)) {
           st.nagAt = now; st.nagN = (st.nagN || 0) + 1;
           const mins = Math.round((now - taskAt) / 60000);
           await sendToUser(u, '🔁 עדיין לא בוצע: ' + U((prefix || '') + t.name), 'נקבע ל-' + t.time + ' (באיחור: ' + (mins < 60 ? mins + ' דק׳' : Math.round(mins / 60) + ' שע׳') + '). סמן ✅ בוצע כדי להפסיק', id, act);
@@ -502,4 +509,4 @@ function register(app, admin, db, express) {
   console.log('⏰ תזכורות משימות פעילות');
 }
 
-module.exports = { register, ilTime, health };
+module.exports = { register, ilTime, validTz, health };
