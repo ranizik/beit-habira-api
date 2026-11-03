@@ -163,6 +163,13 @@ function register(app, admin, db, express) {
     await db.ref(`todoOrgs/${m.id}/members/${uid}`).set({ role: 'member', name: String(name || '').slice(0, 40), at, by: byUid });
     await db.ref(`todoUserOrg/${uid}`).set(m.id);
     await push(uid, '🏢 צורפת לארגון "' + U(m.org.name) + '"', (byName ? U(byName) : 'מנהל') + ' צירף/ה אותך. רשימות הארגון יופיעו אצלך.');
+    // ארגון שאושר ממליץ על העובדים שלו: עובד חדש שממתין לאישור – נכנס מיד (בלי לחכות לאישור ידני)
+    const acc = (await db.ref(`todoAccess/users/${uid}`).once('value')).val();
+    if (acc && acc.pending) {
+      const cfg = (await db.ref('todoAccess/config').once('value')).val() || {};
+      const now = Date.now();
+      await db.ref(`todoAccess/users/${uid}`).update({ pending: null, start: now, until: now + (Number(cfg.trialDays) || 14) * 864e5, via: 'org:' + m.id });
+    }
   }
 
   route('/tasks/org/invite', async (req, res, d) => {

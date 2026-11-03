@@ -465,7 +465,9 @@ test('ארגון: בקשה, אישור, עובדים, רשימות, דוח, הס
   const link = (await call('POST', '/tasks/org/invite', { token: 'b' })).body.link;
   const [oid, tok] = link.split('?org=')[1].split('.');
   assert.equal((await call('POST', '/tasks/org/join', { token: 'w2', body: { orgId: oid, token: 'bad' } })).body.ok, false);
+  db.ref('todoAccess/users/w2').set({ pending: true, name: 'רון' }); // משתמש חדש שממתין לאישור
   assert.equal((await call('POST', '/tasks/org/join', { token: 'w2', body: { orgId: oid, token: tok } })).body.ok, true);
+  assert.ok(!db.get('todoAccess/users/w2/pending') && db.get('todoAccess/users/w2/until') > Date.now(), 'הצטרפות לארגון מאשרת את העובד');
   assert.equal((await call('POST', '/tasks/org/invite', { token: 'w1' })).status, 403, 'עובד לא מזמין');
 
   r = await call('POST', '/tasks/org/list-create', { token: 'b', body: { name: 'משמרת ערב', members: ['w1', 'x'] } });
