@@ -27,6 +27,7 @@ function ilTime(dateStr, timeStr) {
 const health = { startedAt: Date.now(), lastTickAt: 0, lastOkAt: 0, consecutiveErr: 0, lastError: '', sendOk: 0, sendFail: 0 };
 
 function register(app, admin, db, express) {
+  const { U, tr, ACT, LANGS } = require('./tasksI18n');
   async function authUser(req) {
     const h = req.headers.authorization || '';
     const decoded = h.startsWith('Bearer ') ? await admin.auth().verifyIdToken(h.slice(7)).catch(() => null) : null;
@@ -76,12 +77,12 @@ function register(app, admin, db, express) {
         const limit = await require('./tasksAccess').memberLimit(db, list.owner).catch(() => Infinity);
         const count = Object.keys(list.members || {}).length;
         if (count >= limit) {
-          if (list.owner && list.owner !== d.uid) await sendToUser(list.owner, '👥 ' + (list.name || 'רשימה משותפת') + ' – הרשימה מלאה', displayName(d) + ' ניסה/תה להצטרף, אבל הגעת ל-' + limit + ' משתתפים. אפשר להוסיף מקומות – פנה/י לרני', 'list-' + listId).catch(() => 0);
+          if (list.owner && list.owner !== d.uid) await sendToUser(list.owner, '👥 ' + (list.name ? U(list.name) : 'רשימה משותפת') + ' – הרשימה מלאה', U(displayName(d)) + ' ניסה/תה להצטרף, אבל הגעת ל-' + limit + ' משתתפים. אפשר להוסיף מקומות – פנה/י לרני', 'list-' + listId).catch(() => 0);
           return res.status(403).json({ error: 'הרשימה מלאה (' + limit + ' משתתפים). בעל/ת הרשימה יכול/ה להוסיף מקומות.', full: true });
         }
         await db.ref(`todo/shared/${listId}/members/${d.uid}`).set({ name: displayName(d), at: Date.now(), via: 'link' });
         await logList(listId, { type: 'join', uid: d.uid, name: displayName(d) });
-        if (list.owner && list.owner !== d.uid) await sendToUser(list.owner, '👥 ' + (list.name || 'רשימה משותפת'), displayName(d) + ' הצטרף/ה לרשימה', 'list-' + listId).catch(() => 0);
+        if (list.owner && list.owner !== d.uid) await sendToUser(list.owner, '👥 ' + (list.name ? U(list.name) : 'רשימה משותפת'), U(displayName(d)) + ' הצטרף/ה לרשימה', 'list-' + listId).catch(() => 0);
       }
       await db.ref(`todo/userLists/${d.uid}/${listId}`).set(true);
       res.json({ ok: true, listId, name: list.name });
@@ -113,8 +114,8 @@ function register(app, admin, db, express) {
       const others = Object.keys(list.members).filter((u) => u !== d.uid && SAFE.test(u));
       let sent = 0;
       for (const u of others) {
-        if (u === assignee) sent += await sendToUser(u, '📌 ' + (list.name || 'רשימה משותפת') + ' – באחריותך', who + ': ' + name, 'list-' + listId);
-        else if (!reassign) sent += await sendToUser(u, '👥 ' + (list.name || 'רשימה משותפת'), who + ' הוסיף/ה: ' + name + (assignee && list.members[assignee] ? ' (באחריות ' + (list.members[assignee].name || '') + ')' : ''), 'list-' + listId);
+        if (u === assignee) sent += await sendToUser(u, '📌 ' + (list.name ? U(list.name) : 'רשימה משותפת') + ' – באחריותך', U(who) + ': ' + U(name), 'list-' + listId);
+        else if (!reassign) sent += await sendToUser(u, '👥 ' + (list.name ? U(list.name) : 'רשימה משותפת'), U(who) + ' הוסיף/ה: ' + U(name) + (assignee && list.members[assignee] ? ' (באחריות ' + U(list.members[assignee].name || '') + ')' : ''), 'list-' + listId);
       }
       res.json({ ok: true, sent });
     } catch (err) {
@@ -136,7 +137,7 @@ function register(app, admin, db, express) {
       await db.ref(`todo/userLists/${d.uid}/${listId}`).remove();
       if (wasMember) {
         await logList(listId, { type: 'leave', uid: d.uid, name: (lv.members[d.uid] && lv.members[d.uid].name) || displayName(d) });
-        if (lv.owner && lv.owner !== d.uid && lv.members[lv.owner]) await sendToUser(lv.owner, '👥 ' + (lv.name || 'רשימה משותפת'), ((lv.members[d.uid] && lv.members[d.uid].name) || displayName(d)) + ' יצא/ה מהרשימה', 'list-' + listId).catch(() => 0);
+        if (lv.owner && lv.owner !== d.uid && lv.members[lv.owner]) await sendToUser(lv.owner, '👥 ' + (lv.name ? U(lv.name) : 'רשימה משותפת'), U((lv.members[d.uid] && lv.members[d.uid].name) || displayName(d)) + ' יצא/ה מהרשימה', 'list-' + listId).catch(() => 0);
       }
       // הרשימה עצמה לא נמחקת לעולם (גם כשכולם יצאו) - כדי שלא יאבדו משימות בטעות
       res.json({ ok: true });
@@ -252,7 +253,7 @@ function register(app, admin, db, express) {
       await db.ref(`todo/shared/${listId}/members/${target}`).set({ name: String(tName).slice(0, 40), at: now, by: d.uid, byName, via: 'added' });
       await db.ref(`todo/userLists/${target}/${listId}`).set(true);
       await logList(listId, { type: 'add', uid: target, name: tName, by: d.uid, byName });
-      await sendToUser(target, '👥 צורפת לרשימה "' + (list.name || 'רשימה משותפת') + '"', byName + ' צירף/ה אותך. אפשר לצאת מהרשימה בכל רגע.', 'list-' + listId).catch(() => 0);
+      await sendToUser(target, '👥 צורפת לרשימה "' + (list.name ? U(list.name) : 'רשימה משותפת') + '"', U(byName) + ' צירף/ה אותך. אפשר לצאת מהרשימה בכל רגע.', 'list-' + listId).catch(() => 0);
       res.json({ ok: true, name: tName });
     } catch (err) {
       console.error('POST /tasks/lists/add error:', err.message);
@@ -276,10 +277,43 @@ function register(app, admin, db, express) {
     }
   });
 
+  const langCache = {};
+  // העדפת שפה (לתזכורות בשפת המשתמש): POST /tasks/prefs { lang? } -> { ok, lang }
+  app.post('/tasks/prefs', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!d) return res.status(401).json({ error: 'אין הרשאה' });
+      const lang = (req.body || {}).lang;
+      if (lang !== undefined) {
+        if (!LANGS.includes(lang)) return res.status(400).json({ error: 'שפה לא נתמכת' });
+        await db.ref(`todoPrefs/${d.uid}/lang`).set(lang);
+        langCache[d.uid] = { lang, at: Date.now() };
+        return res.json({ ok: true, lang });
+      }
+      const v = (await db.ref(`todoPrefs/${d.uid}/lang`).once('value')).val();
+      res.json({ ok: true, lang: LANGS.includes(v) ? v : null });
+    } catch (err) {
+      console.error('POST /tasks/prefs error:', err.message);
+      res.status(500).json({ error: 'שגיאת שרת' });
+    }
+  });
+  async function userLang(uid) {
+    const c = langCache[uid];
+    if (c && Date.now() - c.at < 10 * 60000) return c.lang;
+    const v = (await db.ref(`todoPrefs/${uid}/lang`).once('value').catch(() => null));
+    const lang = v && LANGS.includes(v.val()) ? v.val() : 'he';
+    langCache[uid] = { lang, at: Date.now() };
+    return lang;
+  }
   async function sendToUser(uid, title, body, taskId, extra) {
     const snap = await db.ref(`todoPushTokens/${uid}`).once('value');
     const entries = Object.entries(snap.val() || {}).filter(([, v]) => v && v.token);
     if (!entries.length) return 0;
+    // שפת המשתמש: מתרגמים את הטקסט הקבוע; תוכן משתמשים (עטוף ב-U) נשאר כמו שהוא
+    const lang = await userLang(uid);
+    title = tr(lang, title); body = tr(lang, body);
+    const A = ACT[lang] || ACT.he;
+    extra = { ...(extra || {}), lang, l1: A[0], l2: A[1], l3: A[2], l4: A[3] };
     const result = await admin.messaging().sendEachForMulticast({
       tokens: entries.map(([, v]) => v.token),
       notification: { title, body },
@@ -399,20 +433,20 @@ function register(app, admin, db, express) {
         const eveAt = ilTime(prevDay, cfg.eveTime || '20:00');
         if (cfg.eve && !st.eve && !rem.eve && fresh(eveAt)) {
           st.eve = 1;
-          await sendToUser(u, '📋 תזכורת למחר: ' + (prefix || '') + t.name, 'מחר' + (t.time ? ' בשעה ' + t.time : ''), id);
+          await sendToUser(u, '📋 תזכורת למחר: ' + U((prefix || '') + t.name), 'מחר' + (t.time ? ' בשעה ' + t.time : ''), id);
         }
         // לפני המשימה - כמו ביומן (רק למשימות עם שעה)
         if (t.time) for (const m of (Array.isArray(cfg.before) ? cfg.before : [])) {
           const at = taskAt - m * 60000;
           if (!st['b' + m] && fresh(at) && now < taskAt) {
             st['b' + m] = 1;
-            await sendToUser(u, '⏳ ' + label(m) + ': ' + (prefix || '') + t.name, (m >= 1440 ? 'מחר ' : 'היום ') + 'בשעה ' + t.time, id);
+            await sendToUser(u, '⏳ ' + label(m) + ': ' + U((prefix || '') + t.name), (m >= 1440 ? 'מחר ' : 'היום ') + 'בשעה ' + t.time, id);
           }
         }
         // בשעת המשימה
         if (t.time && cfg.at && !st.at && !rem.at && now >= taskAt && now - taskAt < MAX_LATE_MS) {
           st.at = 1; st.atAt = now;
-          await sendToUser(u, '⏰ הגיע הזמן: ' + (prefix || '') + t.name, 'עכשיו - ' + t.time, id, act);
+          await sendToUser(u, '⏰ הגיע הזמן: ' + U((prefix || '') + t.name), 'עכשיו - ' + t.time, id, act);
         }
         // נודניק
         const maxN = cfg.max ? cfg.max : NAG_MAX;
@@ -422,7 +456,7 @@ function register(app, admin, db, express) {
             && now - lastNag >= (cfg.every || 30) * 60000 && !quiet(now)) {
           st.nagAt = now; st.nagN = (st.nagN || 0) + 1;
           const mins = Math.round((now - taskAt) / 60000);
-          await sendToUser(u, '🔁 עדיין לא בוצע: ' + (prefix || '') + t.name, 'נקבע ל-' + t.time + ' (לפני ' + (mins < 60 ? mins + ' דק׳' : Math.round(mins / 60) + ' שע׳') + '). סמן ✅ בוצע כדי להפסיק', id, act);
+          await sendToUser(u, '🔁 עדיין לא בוצע: ' + U((prefix || '') + t.name), 'נקבע ל-' + t.time + ' (באיחור: ' + (mins < 60 ? mins + ' דק׳' : Math.round(mins / 60) + ' שע׳') + '). סמן ✅ בוצע כדי להפסיק', id, act);
         }
         if (JSON.stringify(st) !== JSON.stringify(per[u] || {})) { per[u] = st; changed = true; }
       }

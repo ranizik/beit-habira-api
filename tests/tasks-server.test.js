@@ -520,3 +520,29 @@ test('ארגון: בקשה, אישור, עובדים, רשימות, דוח, הס
   assert.equal((await call('POST', '/tasks/org/list-delete', { token: 'b', body: { listId } })).body.ok, true);
   assert.equal(db.get(`todo/shared/${listId}`), undefined);
 });
+
+// ---------- שפות: תזכורות והתראות בשפת המשתמש ----------
+test('שפה: /tasks/prefs נשמר, וההתראות מתורגמות בלי לגעת בתוכן המשתמש', async () => {
+  const { tr, U } = require('../tasksI18n');
+  assert.equal(tr('en', '⏰ הגיע הזמן: ' + U('לקנות חלב')), '⏰ Time\'s up: לקנות חלב');
+  assert.equal(tr('ru', 'מחר בשעה 10:00'), 'Завтра в 10:00');
+  assert.equal(tr('fr', 'היום בשעה 09:30'), 'Aujourd\'hui à 09:30');
+  assert.equal(tr('es', '⏳ בעוד 30 דק׳: ' + U('x')), '⏳ En 30 min: x');
+  assert.equal(tr('ar', 'נקבע ל-15:00 (באיחור: 20 דק׳). סמן ✅ בוצע כדי להפסיק'), 'مقررة في 15:00 (متأخرة: 20 د). اضغط ✅ تم للإيقاف');
+  assert.equal(tr('he', '👥 ' + U('בית')), '👥 בית');
+  assert.ok(!/[֐-׿]/.test(tr('en', '👥 צורפת לרשימה "' + U('L') + '"')), 'אין עברית שנשארה');
+
+  const db = fakeDb({ todoPushTokens: { u1: { d: { token: 'T1' } } } });
+  const admin = fakeAdmin({ u1: { name: 'Dana' } });
+  admin.tokens.a = { uid: 'u1', name: 'Dana' };
+  const { call } = load(['taskReminders'], db, admin);
+  assert.equal((await call('POST', '/tasks/prefs', { token: 'a', body: { lang: 'xx' } })).status, 400);
+  assert.equal((await call('POST', '/tasks/prefs', { token: 'a', body: { lang: 'en' } })).body.lang, 'en');
+  assert.equal((await call('POST', '/tasks/prefs', { token: 'a' })).body.lang, 'en');
+  const send = require('../taskReminders').sendToUser;
+  await send('u1', '⏰ הגיע הזמן: ' + U('לקנות חלב'), 'עכשיו - 10:00', 't1', { act: 'x' });
+  const m = admin.sent[admin.sent.length - 1];
+  assert.equal(m.title, '⏰ Time\'s up: לקנות חלב');
+  assert.equal(m.body, 'Now - 10:00');
+  assert.equal(m.data.l1, '✅ Done');
+});

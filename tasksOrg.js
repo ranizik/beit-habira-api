@@ -26,6 +26,7 @@
  *   /tasks/org/report                    -> לכל עובד: פתוחות, באיחור, בוצעו ב-7 ימים, לפי רשימה
  */
 const crypto = require('crypto');
+const { U } = require('./tasksI18n');
 const SAFE = /^[-_A-Za-z0-9]{1,128}$/;
 const OWNER_APP = 'staff-tasks';
 const ROLES = ['owner', 'manager', 'member'];
@@ -136,7 +137,7 @@ function register(app, admin, db, express) {
       const status = b.action === 'approve' ? 'active' : 'rejected';
       await db.ref(`todoOrgs/${b.orgId}/status`).set(status);
       if (status === 'rejected') await db.ref(`todoUserOrg/${org.owner}`).remove();
-      await push(org.owner, status === 'active' ? '🏢 הארגון "' + org.name + '" אושר' : '🏢 הבקשה לארגון לא אושרה',
+      await push(org.owner, status === 'active' ? '🏢 הארגון "' + U(org.name) + '" אושר' : '🏢 הבקשה לארגון לא אושרה',
         status === 'active' ? 'אפשר לצרף עובדים וליצור רשימות – 🏢 בכותרת' : 'לפרטים – פנה לרני');
       return res.json({ ok: true, status });
     }
@@ -161,7 +162,7 @@ function register(app, admin, db, express) {
     const at = Date.now();
     await db.ref(`todoOrgs/${m.id}/members/${uid}`).set({ role: 'member', name: String(name || '').slice(0, 40), at, by: byUid });
     await db.ref(`todoUserOrg/${uid}`).set(m.id);
-    await push(uid, '🏢 צורפת לארגון "' + m.org.name + '"', (byName || 'מנהל') + ' צירף/ה אותך. רשימות הארגון יופיעו אצלך.');
+    await push(uid, '🏢 צורפת לארגון "' + U(m.org.name) + '"', (byName ? U(byName) : 'מנהל') + ' צירף/ה אותך. רשימות הארגון יופיעו אצלך.');
   }
 
   route('/tasks/org/invite', async (req, res, d) => {
@@ -177,7 +178,7 @@ function register(app, admin, db, express) {
     if (cur && cur.org.status !== 'rejected') return res.json({ ok: false, error: 'אתה כבר חבר בארגון אחר' });
     if (Object.keys(org.members || {}).length >= await limitFor(org)) return res.json({ ok: false, error: 'הארגון מלא – פנה למנהל' });
     await addMember({ id: b.orgId, org }, d.uid, nameOf(d), d.uid, nameOf(d));
-    await push(org.owner, '🏢 ' + org.name, nameOf(d) + ' הצטרף/ה לארגון בקישור');
+    await push(org.owner, '🏢 ' + U(org.name), U(nameOf(d)) + ' הצטרף/ה לארגון בקישור');
     res.json({ ok: true, name: org.name });
   });
 
@@ -206,7 +207,7 @@ function register(app, admin, db, express) {
     for (const { id, l } of await orgLists(m.id)) if (l.members && l.members[b.uid]) moved += await removeFromList(id, l, b.uid, d.uid, (m.org.members[d.uid] || {}).name || me, me);
     await db.ref(`todoOrgs/${m.id}/members/${b.uid}`).remove();
     await db.ref(`todoUserOrg/${b.uid}`).remove();
-    await push(b.uid, '🏢 ' + m.org.name, 'הוסרת מהארגון. המשימות הפרטיות שלך נשארות אצלך.');
+    await push(b.uid, '🏢 ' + U(m.org.name), 'הוסרת מהארגון. המשימות הפרטיות שלך נשארות אצלך.');
     res.json({ ok: true, moved });
   });
 
@@ -230,7 +231,7 @@ function register(app, admin, db, express) {
     for (const { id, l } of await orgLists(m.id)) if (l.members && l.members[d.uid]) await removeFromList(id, l, d.uid, owner, oName, nameOf(d));
     await db.ref(`todoOrgs/${m.id}/members/${d.uid}`).remove();
     await db.ref(`todoUserOrg/${d.uid}`).remove();
-    await push(owner, '🏢 ' + m.org.name, nameOf(d) + ' עזב/ה את הארגון. משימות פתוחות שבאחריותו/ה עברו אליך.');
+    await push(owner, '🏢 ' + U(m.org.name), U(nameOf(d)) + ' עזב/ה את הארגון. משימות פתוחות שבאחריותו/ה עברו אליך.');
     res.json({ ok: true });
   });
 
@@ -251,7 +252,7 @@ function register(app, admin, db, express) {
     await db.ref(`todoOrgLists/${m.id}/${listId}`).set(true);
     for (const u of uids) {
       await db.ref(`todo/userLists/${u}/${listId}`).set(true);
-      if (u !== d.uid) await push(u, '🏢 רשימה חדשה: ' + name, m.org.name + ' – צורפת לרשימה');
+      if (u !== d.uid) await push(u, '🏢 רשימה חדשה: ' + U(name), U(m.org.name) + ' – צורפת לרשימה');
     }
     await logList(listId, { type: 'create', uid: d.uid, name: nameOf(d) });
     res.json({ ok: true, listId });
@@ -274,7 +275,7 @@ function register(app, admin, db, express) {
       await db.ref(`todo/shared/${b.listId}/members/${u}`).set({ name: (m.org.members[u] || {}).name || '', at: Date.now(), via: 'org', by: d.uid, byName: me });
       await db.ref(`todo/userLists/${u}/${b.listId}`).set(true);
       await logList(b.listId, { type: 'add', uid: u, name: (m.org.members[u] || {}).name || '', by: d.uid, byName: me });
-      await push(u, '🏢 ' + (l.name || 'רשימה'), me + ' צירף/ה אותך לרשימה');
+      await push(u, '🏢 ' + (l.name ? U(l.name) : 'רשימה'), U(me) + ' צירף/ה אותך לרשימה');
       added++;
     }
     for (const u of pick(m, b.remove)) {
