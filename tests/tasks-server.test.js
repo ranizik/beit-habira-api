@@ -66,6 +66,17 @@ test('מנויים: תקופת הרצה (חינם) מול מצב בתשלום', 
   assert.equal((await call('POST', '/tasks/access/me', { token: 'u' })).body.price, 45, 'מחיר עסקי');
   await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'kind', kind: 'private' } });
   assert.equal((await call('POST', '/tasks/access/me', { token: 'u' })).body.price, 15, 'מחיר פרטי');
+  // תשלום בתוך האפליקציה: כבוי כברירת מחדל, לא נפתח בלי קישור, קישור רק https
+  assert.equal((await call('POST', '/tasks/access/me', { token: 'u' })).body.payUrl, undefined, 'כבוי');
+  assert.equal((await call('POST', '/tasks/access/config', { token: 'r', body: { payEnabled: true } })).body.ok, false, 'בלי קישור לא נפתח');
+  await call('POST', '/tasks/access/config', { token: 'r', body: { payUrl: 'javascript:alert(1)' } });
+  assert.equal(db.get('todoAccess/config/payUrl'), undefined, 'רק https');
+  await call('POST', '/tasks/access/config', { token: 'r', body: { payUrl: 'https://pay.example.com/p', payUrlBusiness: 'https://pay.example.com/b' } });
+  assert.equal((await call('POST', '/tasks/access/me', { token: 'u' })).body.payUrl, undefined, 'עדיין כבוי');
+  await call('POST', '/tasks/access/config', { token: 'r', body: { payEnabled: true } });
+  assert.equal((await call('POST', '/tasks/access/me', { token: 'u' })).body.payUrl, 'https://pay.example.com/p');
+  await call('POST', '/tasks/access/set', { token: 'r', body: { uid: 'u1', action: 'kind', kind: 'business' } });
+  assert.equal((await call('POST', '/tasks/access/me', { token: 'u' })).body.payUrl, 'https://pay.example.com/b', 'קישור עסקי');
 });
 
 // ---------- תזכורות + נודניק ----------

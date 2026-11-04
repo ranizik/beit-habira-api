@@ -17,7 +17,7 @@ const { isAdmin, ADMIN_EMAILS: OWNER_EMAILS } = require('./tasksAdmin'); // הח
 const DAY = 864e5;
 // freeMode = תקופת הרצה: כל מי שאושר משתמש בחינם בלי הגבלת זמן (אין נעילה אוטומטית ואין תזכורות סוף תקופה)
 // מסלולים: פרטי / עסקי - מחיר חודשי, כמה משתתפים ברשימה משותפת כלולים, ומחיר לכל משתתף נוסף
-const DEF_CONFIG = { trialDays: 30, price: 20, priceBusiness: 40, membersPrivate: 5, membersBusiness: 12, extraPricePrivate: 5, extraPriceBusiness: 5, contact: '0559800017', approval: true, freeMode: true };
+const DEF_CONFIG = { trialDays: 30, price: 20, priceBusiness: 40, membersPrivate: 5, membersBusiness: 12, extraPricePrivate: 5, extraPriceBusiness: 5, contact: '0559800017', approval: true, freeMode: true, payEnabled: false, payUrl: '', payUrlBusiness: '' };
 // משתמשים שנרשמו לפני שהופעל 'אישור ידני' - מקבלים ניסיון רגיל ולא נחסמים
 const APPROVAL_SINCE = Date.parse('2026-10-27T16:30:00Z');
 
@@ -49,6 +49,8 @@ function register(app, admin, db, express) {
     locked: !!a.locked, pending: !!a.pending, plan: a.plan || 'trial', until: a.until == null ? null : a.until,
     daysLeft: (a.until == null || cfg.freeMode) ? null : Math.max(0, Math.ceil((a.until - now) / DAY)),
     kind: a.kind || '', ...planOf(a, cfg), contact: cfg.contact,
+    // תשלום בתוך האפליקציה – כבוי עד שמפעילים בניהול (דף תשלום של חברת הסליקה)
+    payUrl: cfg.payEnabled ? (String((a.kind === 'business' && cfg.payUrlBusiness) || cfg.payUrl || '') || undefined) : undefined,
     orgReq: a.pending && a.orgReq && a.orgReq.name ? String(a.orgReq.name) : undefined,
   });
   async function ensure(uid, info, created) {
@@ -198,6 +200,9 @@ function register(app, admin, db, express) {
       if (b.approval != null) upd.approval = !!b.approval;
       if (b.freeMode != null) upd.freeMode = !!b.freeMode;
       if (b.consentActive != null) upd.consentActive = !!b.consentActive; // חובת אישור תנאים - רק אחרי פרסום המסמכים
+      if (b.payEnabled != null) upd.payEnabled = !!b.payEnabled;
+      for (const k of ['payUrl', 'payUrlBusiness']) if (b[k] != null) { const v = String(b[k]).trim().slice(0, 500); if (!v || /^https:\/\/[^\s"'<>]+$/.test(v)) upd[k] = v; }
+      if (upd.payEnabled && !(upd.payUrl || (await getConfig()).payUrl)) return res.json({ ok: false, error: 'כדי להפעיל תשלום צריך קישור לדף התשלום' });
       if (b.contact != null) { const v = String(b.contact).replace(/[^0-9+]/g, '').slice(0, 15); if (v.length >= 9) upd.contact = v; }
       await db.ref('todoAccess/config').update(upd);
       res.json({ ok: true, config: await getConfig() });
