@@ -223,7 +223,7 @@ function register(app, admin, db, express) {
         if (a.until > now && a.until - now <= DAY && a.warned !== a.until) {
           await db.ref(`todoAccess/users/${uid}/warned`).set(a.until);
           await push(OWNER, '⏳ ' + who + ': ' + (paid ? 'המנוי נגמר מחר' : 'הניסיון נגמר מחר'), 'כדאי לדבר איתה/ו על המשך – 📊 ← משתמשים');
-          await push(uid, '⏳ ' + (paid ? 'המנוי שלך בתכל׳ס נגמר מחר' : 'תקופת הניסיון בתכל׳ס נגמרת מחר'), 'כדי להמשיך להשתמש – פנה/י לרני');
+          await push(uid, '⏳ ' + (paid ? 'המנוי שלך בתכל׳ס נגמר מחר' : 'תקופת הניסיון בתכל׳ס נגמרת מחר'), 'כדי להמשיך להשתמש – פנה/י לתכל׳ס');
         }
         if (a.until <= now && a.ended !== a.until && now - a.until < 7 * DAY) {
           await db.ref(`todoAccess/users/${uid}/ended`).set(a.until);

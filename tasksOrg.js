@@ -139,7 +139,7 @@ function register(app, admin, db, express) {
       await db.ref(`todoOrgs/${b.orgId}/status`).set(status);
       if (status === 'rejected') await db.ref(`todoUserOrg/${org.owner}`).remove();
       await push(org.owner, status === 'active' ? '🏢 הארגון "' + U(org.name) + '" אושר' : '🏢 הבקשה לארגון לא אושרה',
-        status === 'active' ? 'אפשר לצרף עובדים וליצור רשימות – 🏢 בכותרת' : 'לפרטים – פנה לרני');
+        status === 'active' ? 'אפשר לצרף עובדים וליצור רשימות – 🏢 בכותרת' : 'לפרטים – פנה לתכל׳ס');
       return res.json({ ok: true, status });
     }
     if (b.action === 'delete') { // מוחק את מסגרת הארגון בלבד; רשימות הארגון נשארות כרשימות משותפות רגילות
@@ -208,7 +208,7 @@ function register(app, admin, db, express) {
     }
     const cur = await myOrg(uid);
     if (cur && cur.org.status !== 'rejected') { await done(); return res.json({ ok: false, error: 'המשתמש כבר חבר בארגון אחר' }); }
-    if (Object.keys(m.org.members || {}).length >= await limitFor(m.org)) return res.json({ ok: false, error: 'הגעת למספר העובדים במסלול. להגדלה – פנה לרני.' });
+    if (Object.keys(m.org.members || {}).length >= await limitFor(m.org)) return res.json({ ok: false, error: 'הגעת למספר העובדים במסלול. להגדלה – פנה לתכל׳ס.' });
     await done();
     await addMember(m, uid, rq.name, d.uid, nameOf(d));
     res.json({ ok: true, name: rq.name });
@@ -222,7 +222,7 @@ function register(app, admin, db, express) {
     if (m.org.members && m.org.members[u.uid]) return res.json({ ok: true, already: true });
     const cur = await myOrg(u.uid);
     if (cur && cur.org.status !== 'rejected') return res.json({ ok: false, error: 'המשתמש כבר חבר בארגון אחר' });
-    if (Object.keys(m.org.members || {}).length >= await limitFor(m.org)) return res.json({ ok: false, error: 'הגעת למספר העובדים במסלול. להגדלה – פנה לרני.' });
+    if (Object.keys(m.org.members || {}).length >= await limitFor(m.org)) return res.json({ ok: false, error: 'הגעת למספר העובדים במסלול. להגדלה – פנה לתכל׳ס.' });
     await addMember(m, u.uid, u.displayName || email.split('@')[0], d.uid, nameOf(d));
     res.json({ ok: true, name: u.displayName || email });
   });
@@ -254,7 +254,7 @@ function register(app, admin, db, express) {
   route('/tasks/org/leave', async (req, res, d) => {
     const m = await myOrg(d.uid);
     if (!m) return res.json({ ok: true });
-    if (m.role === 'owner' && m.org.status === 'active') return res.json({ ok: false, error: 'בעל הארגון לא יכול לעזוב. לסגירת הארגון – פנה לרני.' });
+    if (m.role === 'owner' && m.org.status === 'active') return res.json({ ok: false, error: 'בעל הארגון לא יכול לעזוב. לסגירת הארגון – פנה לתכל׳ס.' });
     if (m.role === 'owner') { // בקשה שעדיין ממתינה / נדחתה – מבטלים
       await db.ref(`todoOrgs/${m.id}`).remove(); await db.ref(`todoUserOrg/${d.uid}`).remove();
       return res.json({ ok: true, cancelled: true });
