@@ -1236,6 +1236,88 @@ app.get('/files/orders.xlsx', async (req, res) => {
   }
 });
 
+// ================= קבצי CSV (לינק ישיר - תואם למנוע ולמערכות קופה) =================
+
+// פונקציית עזר: הופכת ערך לשדה CSV תקין (בורחת מפסיקים, גרשיים, שורות חדשות)
+function toCsvField(value) {
+  if (value === null || value === undefined) return '';
+  const s = String(value);
+  if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+function toCsvRow(fields) {
+  return fields.map(toCsvField).join(',');
+}
+
+// GET /files/products.csv?branch=shfayim&api_key=...
+app.get('/files/products.csv', async (req, res) => {
+  try {
+    const { branch } = req.query;
+    if (!validateBranch(branch, res)) return;
+    const products = await fetchProducts(branch);
+
+    const headers = ['barcode', 'name', 'category', 'supplier', 'unitPrice', 'unitsPerBox', 'promoActive', 'promoType', 'promoValue'];
+    const lines = [
+      toCsvRow(headers),
+      ...products.map((p) => toCsvRow([
+        p.barcode, p.name, p.category, p.supplier,
+        p.unitPrice, p.unitsPerBox,
+        p.promoActive ? '1' : '0', p.promoType || '', p.promoValue || '',
+      ])),
+    ];
+    // UTF-8 BOM כדי שאקסל יזהה עברית נכון
+    const bom = '﻿';
+    const csv = bom + lines.join('\r\n');
+    const buf = Buffer.from(csv, 'utf8');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="products-${branch}.csv"`);
+    res.setHeader('Content-Length', buf.length);
+    res.end(buf);
+  } catch (err) {
+    console.error('GET /files/products.csv error:', err.message);
+    res.status(502).json({ error: 'שגיאה ביצירת קובץ CSV', details: err.message });
+  }
+});
+
+// GET /files/orders.csv?branch=shfayim&api_key=...&from=YYYY-MM-DD&to=YYYY-MM-DD
+app.get('/files/orders.csv', async (req, res) => {
+  try {
+    const { branch, from, to } = req.query;
+    if (!validateBranch(branch, res)) return;
+
+    const [orderRecords, products] = await Promise.all([
+      fetchOrders(branch, { from, to }),
+      fetchProducts(branch),
+    ]);
+    const barcodeMap = new Map();
+    products.forEach((p) => barcodeMap.set(`${p.category}||${p.name}`, p.barcode));
+    const rows = ordersToManeoRows(orderRecords, barcodeMap);
+
+    const headers = ['orderId', 'date', 'supplier', 'barcode', 'name', 'quantity', 'unitPrice', 'discount'];
+    const lines = [
+      toCsvRow(headers),
+      ...rows.map((r) => toCsvRow([
+        r.orderId, r.date, r.supplier, r.barcode,
+        r.name, r.quantity, r.unitPrice, r.discount || '',
+      ])),
+    ];
+    const bom = '﻿';
+    const csv = bom + lines.join('\r\n');
+    const buf = Buffer.from(csv, 'utf8');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="orders-${branch}.csv"`);
+    res.setHeader('Content-Length', buf.length);
+    res.end(buf);
+  } catch (err) {
+    console.error('GET /files/orders.csv error:', err.message);
+    res.status(502).json({ error: 'שגיאה ביצירת קובץ CSV', details: err.message });
+  }
+});
+
 // ================= סנכרון מוצרים מ-WooCommerce =================
 //
 // TODO לפני הפעלה בפועל:
