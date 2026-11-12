@@ -1272,7 +1272,7 @@ app.get('/files/products.csv', async (req, res) => {
     const csv = bom + lines.join('\r\n');
     const buf = Buffer.from(csv, 'utf8');
 
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Length', buf.length);
     res.end(buf);
   } catch (err) {
@@ -1307,7 +1307,7 @@ app.get('/files/orders.csv', async (req, res) => {
     const csv = bom + lines.join('\r\n');
     const buf = Buffer.from(csv, 'utf8');
 
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Length', buf.length);
     res.end(buf);
   } catch (err) {
