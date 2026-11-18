@@ -86,16 +86,29 @@ function register(app, admin, db, express) {
     }
   });
 
-  app.post('/tasks/stats/summary', express.json(), async (req, res) => {
-    try {
-      const d = await authUser(req);
-      if (!require('./tasksAdmin').isAdmin(d)) return res.status(401).json({ error: 'רק לבעל העסק (אימות Google)' });
+  // מטמון בצד השרת (18-11-2026): החישוב כבד (קורא את כל העצים), לכן התשובה נשמרת
+  // ומוגשת מיד, והרענון רץ ברקע. בלי זה כל פתיחה של הפאנל חיכתה לחישוב מלא.
+  let sumCache = null, sumAt = 0, sumBusy = null;
+  const SUM_FRESH = 60e3;        // עד דקה - מגישים בלי לרענן
+  const SUM_MAX = 10 * 60e3;     // מעל 10 דקות - כבר לא מגישים מהמטמון
+  function sumRefresh() {
+    if (!sumBusy) {
+      sumBusy = computeSummary()
+        .then((d) => { sumCache = d; sumAt = Date.now(); return d; })
+        .finally(() => { sumBusy = null; });
+    }
+    return sumBusy;
+  }
+  function sumInvalidate() { sumCache = null; sumAt = 0; }
+  // חימום אחרי עלייה, כדי שגם הפתיחה הראשונה תהיה מיידית
+  try { const w = setTimeout(() => sumRefresh().catch(() => {}), 30000); if (w.unref) w.unref(); } catch (e) {}
+
+  async function computeSummary() {
       const now = Date.now();
       const DAY = 864e5;
-      const visitorsP = db.ref('todoStats/visitors').once('value').then((x) => x.val() || {});
       const [stats, todo, push, gcal] = await Promise.all(['todoStats', 'todo', 'todoPushTokens', 'todoGcal'].map((p) => db.ref(p).once('value').then((s) => s.val() || {})));
       const sUsers = stats.users || {};
-      const visitors = await visitorsP;
+      const visitors = stats.visitors || {}; // כבר הגיע בתוך todoStats - בלי הורדה שנייה של אותו עץ
       const daily = stats.daily || {};
 
       // משתמשים = מי שנכנס עם Google לאפליקציית המשימות (לא כולל כניסת המנהל)
@@ -145,7 +158,7 @@ function register(app, admin, db, express) {
       const sum = (f) => Object.values(daily).reduce((a, dd) => a + (Number(dd && dd[f]) || 0), 0);
       const pushUsers = Object.keys(push).filter((u) => u !== OWNER && !ownerUids.has(u)).length;
 
-      res.json({
+      return {
         ok: true,
         trackingSince: Object.keys(daily).sort()[0] || null,
         users: {
@@ -214,7 +227,20 @@ function register(app, admin, db, express) {
           }
           return out;
         })(),
-      });
+      };
+  }
+
+  app.post('/tasks/stats/summary', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!require('./tasksAdmin').isAdmin(d)) return res.status(401).json({ error: 'רק לבעל העסק (אימות Google)' });
+      const now = Date.now();
+      if (sumCache && now - sumAt < SUM_MAX) {
+        if (now - sumAt > SUM_FRESH) sumRefresh().catch((e) => console.error('summary refresh:', e.message));
+        return res.json({ ...sumCache, cachedAt: sumAt });
+      }
+      const data = await sumRefresh();
+      res.json({ ...data, cachedAt: sumAt });
     } catch (err) {
       console.error('POST /tasks/stats/summary error:', err.message);
       res.status(500).json({ error: 'שגיאת שרת' });
@@ -238,6 +264,7 @@ function register(app, admin, db, express) {
         Object.keys(daily).forEach((k) => { if (daily[k] && daily[k].active) upd[`todoStats/daily/${k}/active`] = null; });
       }
       await db.ref().update(upd);
+      sumInvalidate();
       res.json({ ok: true });
     } catch (err) {
       console.error('POST /tasks/stats/clear error:', err.message);
