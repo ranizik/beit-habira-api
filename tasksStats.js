@@ -90,7 +90,8 @@ function register(app, admin, db, express) {
   // ומוגשת מיד, והרענון רץ ברקע. בלי זה כל פתיחה של הפאנל חיכתה לחישוב מלא.
   let sumCache = null, sumAt = 0, sumBusy = null;
   const SUM_FRESH = 60e3;        // עד דקה - מגישים בלי לרענן
-  const SUM_MAX = 10 * 60e3;     // מעל 10 דקות - כבר לא מגישים מהמטמון
+  // אין תקרה: תמיד מגישים מהמטמון ומרעננים ברקע. חישוב מלא קורא את כל עץ המשימות
+  // ולוקח שניות, ואם מחכים לו הפאנל נתקע - עדיף מספר מלפני כמה דקות, עם cachedAt למסך.
   function sumRefresh() {
     if (!sumBusy) {
       sumBusy = computeSummary()
@@ -101,7 +102,12 @@ function register(app, admin, db, express) {
   }
   function sumInvalidate() { sumCache = null; sumAt = 0; }
   // חימום אחרי עלייה, כדי שגם הפתיחה הראשונה תהיה מיידית
-  try { const w = setTimeout(() => sumRefresh().catch(() => {}), 30000); if (w.unref) w.unref(); } catch (e) {}
+  try { const w = setTimeout(() => sumRefresh().catch(() => {}), 5000); if (w.unref) w.unref(); } catch (e) {}
+  // רענון תקופתי כל עוד השרת ער - כך הפאנל כמעט תמיד מקבל נתון טרי בלי להמתין
+  try {
+    const iv = setInterval(() => { if (Date.now() - sumAt > 4 * 60e3) sumRefresh().catch(() => {}); }, 5 * 60e3);
+    if (iv.unref) iv.unref();
+  } catch (e) {}
 
   async function computeSummary() {
       const now = Date.now();
@@ -235,7 +241,7 @@ function register(app, admin, db, express) {
       const d = await authUser(req);
       if (!require('./tasksAdmin').isAdmin(d)) return res.status(401).json({ error: 'רק לבעל העסק (אימות Google)' });
       const now = Date.now();
-      if (sumCache && now - sumAt < SUM_MAX) {
+      if (sumCache) {
         if (now - sumAt > SUM_FRESH) sumRefresh().catch((e) => console.error('summary refresh:', e.message));
         return res.json({ ...sumCache, cachedAt: sumAt });
       }
