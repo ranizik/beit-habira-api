@@ -89,10 +89,27 @@ function register(app, admin, db, express) {
     }
   });
 
-  app.post('/tasks/access/list', express.json(), async (req, res) => {
-    try {
-      const d = await authUser(req);
-      if (!isAdmin(d)) return res.status(401).json({ error: 'רק לבעל העסק (אימות Google)' });
+  // רשימת המשתמשים קוראת את כל עץ המשימות ואת כל חשבונות Google - שניות.
+  // לכן: מגישים תמיד מהמטמון ומרעננים ברקע, בדיוק כמו סיכום הניהול.
+  let accCache = null, accCachedAt = 0, accBusy = null;
+  const ACC_FRESH = 60e3;
+  function accRefresh() {
+    if (!accBusy) {
+      accBusy = computeAccessList()
+        .then((d) => { accCache = d; accCachedAt = Date.now(); return d; })
+        .finally(() => { accBusy = null; });
+    }
+    return accBusy;
+  }
+  function accInvalidate() { accCache = null; accCachedAt = 0; }
+  try { const w = setTimeout(() => accRefresh().catch(() => {}), 7000); if (w.unref) w.unref(); } catch (e) {}
+  try {
+    // 6 דקות (ולא 5) - כדי לא להתנגש בטיימר של בדיקת הבריאות
+    const iv = setInterval(() => { if (Date.now() - accCachedAt > 5 * 60e3) accRefresh().catch(() => {}); }, 6 * 60e3);
+    if (iv.unref) iv.unref();
+  } catch (e) {}
+
+  async function computeAccessList() {
       const [acc, todo, stats, consent] = await Promise.all(['todoAccess/users', 'todo', 'todoStats/users', 'todoConsent'].map((p) => db.ref(p).once('value').then((s) => s.val() || {})));
       const uids = new Set([...Object.keys(acc), ...Object.keys(todo.users || {}), ...Object.keys(stats)].filter((u) => u !== OWNER && SAFE.test(u)));
       const authInfo = {};
@@ -121,7 +138,19 @@ function register(app, admin, db, express) {
       }
       const rank = (u) => (u.pending ? 0 : u.allowed ? 2 : 1);
       users.sort((x, y) => rank(x) - rank(y) || (x.until || Infinity) - (y.until || Infinity));
-      res.json({ ok: true, config: cfg, users });
+      return { ok: true, config: cfg, users };
+  }
+
+  app.post('/tasks/access/list', express.json(), async (req, res) => {
+    try {
+      const d = await authUser(req);
+      if (!isAdmin(d)) return res.status(401).json({ error: 'רק לבעל העסק (אימות Google)' });
+      if (accCache) {
+        if (Date.now() - accCachedAt > ACC_FRESH) accRefresh().catch((e) => console.error('access refresh:', e.message));
+        return res.json({ ...accCache, cachedAt: accCachedAt });
+      }
+      const data = await accRefresh();
+      res.json({ ...data, cachedAt: accCachedAt });
     } catch (err) {
       console.error('POST /tasks/access/list error:', err.message);
       res.status(500).json({ error: 'שגיאת שרת' });
@@ -143,18 +172,21 @@ function register(app, admin, db, express) {
       else if (action === 'kind') {
         if (!['business', 'private', ''].includes(String(kind || ''))) return res.status(400).json({ error: 'סוג לקוח לא תקף' });
         await db.ref(`todoAccess/users/${uid}/kind`).set(kind || null);
+        accInvalidate();
         return res.json({ ok: true, kind: kind || '' });
       }
       else if (action === 'price') {
         const v = price == null || price === '' ? null : Number(price);
         if (v != null && !(v >= 0 && v <= 100000)) return res.status(400).json({ error: 'מחיר לא תקף' });
         await db.ref(`todoAccess/users/${uid}/customPrice`).set(v);
+        accInvalidate();
         return res.json({ ok: true, ...pub({ ...a, customPrice: v }, cfg, now) });
       }
       else if (action === 'extra') {
         const v = Math.round(Number(extra));
         if (!(v >= 0 && v <= 500)) return res.status(400).json({ error: 'מספר לא תקף' });
         await db.ref(`todoAccess/users/${uid}/extraMembers`).set(v || null);
+        accInvalidate();
         return res.json({ ok: true, ...pub({ ...a, extraMembers: v }, cfg, now) });
       }
       else if (action === 'approve') {
@@ -179,6 +211,7 @@ function register(app, admin, db, express) {
       await db.ref(`todoAccess/users/${uid}`).update(upd);
       const n = { ...a, ...upd };
       if (action !== 'lock' && !allowedNow(a, now, cfg)) await push(uid, a.pending ? '✅ אושרת! ברוך הבא לתכל׳ס' : '✅ תכל׳ס נפתחה', a.pending ? 'אפשר להתחיל – לחץ על המיקרופון ותגיד משימה' : 'אפשר להמשיך להשתמש באפליקציה');
+      accInvalidate();
       res.json({ ok: true, ...pub(n, await getConfig(), now) });
     } catch (err) {
       console.error('POST /tasks/access/set error:', err.message);
@@ -205,6 +238,7 @@ function register(app, admin, db, express) {
       if (upd.payEnabled && !(upd.payUrl || (await getConfig()).payUrl)) return res.json({ ok: false, error: 'כדי להפעיל תשלום צריך קישור לדף התשלום' });
       if (b.contact != null) { const v = String(b.contact).replace(/[^0-9+]/g, '').slice(0, 15); if (v.length >= 9) upd.contact = v; }
       await db.ref('todoAccess/config').update(upd);
+      accInvalidate();
       res.json({ ok: true, config: await getConfig() });
     } catch (err) {
       console.error('POST /tasks/access/config error:', err.message);
