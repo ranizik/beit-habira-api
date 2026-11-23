@@ -166,8 +166,15 @@ function register(app, admin, db, express) {
       const data = r.status === 204 ? {} : await r.json().catch(() => ({}));
       if (r.ok || (op !== 'create' && r.status === 404)) {
         const id = data.id || gtaskId || null;
-        await mirrorEvent(d.uid, token, op, id, task).catch((e) => console.warn('gcal event mirror:', e.message));
-        return res.json({ ok: true, id });
+        let evOk = true;
+        await mirrorEvent(d.uid, token, op, id, task).catch(async (e) => {
+          console.warn('gcal event mirror:', e.message);
+          evOk = false;
+          if (op !== 'delete' && id) await evQueue(d.uid, id, task);
+        });
+        // כל קריאה מנקה את מה שנתקע קודם למשתמש הזה
+        if (evOk) evFlush(d.uid).catch(() => {});
+        return res.json({ ok: true, id, eventPending: !evOk });
       }
       if (r.status === 401) { delete tokenCache[d.uid]; return res.json({ ok: false, error: 'not_connected' }); }
       if (r.status === 403 && /has not been used|disabled|SERVICE_DISABLED/i.test(JSON.stringify(data))) return res.json({ ok: false, error: 'Google Tasks API לא מופעל בפרויקט ב-Google Cloud' });
@@ -222,16 +229,64 @@ function register(app, admin, db, express) {
     }
     if (!task || !/^\d{4}-\d{2}-\d{2}$/.test(String(task.date || ''))) return;
     const alert = !!((await db.ref(`todoNag/${uid}/calAlert`).once('value')).val());
+    // תקלה רגעית אצל גוגל (429/5xx) היא הסיבה הנפוצה לכך שמשימה אחת נכנסת ליומן והבאה לא.
+    // מנסים שוב פעמיים לפני שמוותרים.
+    const tryFetch = async (url, init) => {
+      for (let i = 0; ; i++) {
+        const r = await fetch(url, init);
+        if (r.ok || i === 2 || !(r.status === 429 || r.status >= 500)) return r;
+        await new Promise((ok) => setTimeout(ok, 400 * (i + 1)));
+      }
+    };
     if (evId) {
-      const r = await fetch(CAL_BASE + '/' + evId, { method: 'PATCH', headers: H, body: JSON.stringify(eventBody(task, alert)) });
+      const r = await tryFetch(CAL_BASE + '/' + evId, { method: 'PATCH', headers: H, body: JSON.stringify(eventBody(task, alert)) });
       if (r.ok) return;
       if (r.status !== 404 && r.status !== 410) throw new Error('event patch ' + r.status);
     }
-    const r = await fetch(CAL_BASE, { method: 'POST', headers: H, body: JSON.stringify(eventBody(task, alert)) });
+    const r = await tryFetch(CAL_BASE, { method: 'POST', headers: H, body: JSON.stringify(eventBody(task, alert)) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error('event create ' + r.status + ' ' + ((j.error && j.error.message) || ''));
     await mapRef.set(j.id);
   }
+
+  // ── תור ניסיון חוזר ──
+  // אם היצירה ביומן נכשלה בכל זאת, לא מוותרים בשקט: שומרים את המשימה ומנסים שוב.
+  // בלי זה המשימה נשארת ב-Google Tasks בלי אירוע ביומן לתמיד, והמשתמש רואה
+  // "פעם נכנס ופעם לא" בלי שום הסבר.
+  const EV_TRIES = 5;
+  async function evQueue(uid, gtaskId, task) {
+    try { await db.ref(`todoGcalEvFail/${uid}/${gtaskId}`).set({ at: Date.now(), tries: 0, task }); } catch (e) {}
+  }
+  async function evFlush(uid) {
+    const ref = db.ref(`todoGcalEvFail/${uid}`);
+    const pending = (await ref.once('value')).val();
+    if (!pending) return 0;
+    const token = await accessToken(uid);
+    if (!token) return 0;
+    let done = 0;
+    for (const [gtaskId, row] of Object.entries(pending).slice(0, 50)) {
+      try {
+        await mirrorEvent(uid, token, 'update', gtaskId, row && row.task);
+        await ref.child(gtaskId).remove();
+        done++;
+      } catch (e) {
+        const tries = ((row && row.tries) || 0) + 1;
+        if (tries >= EV_TRIES) await ref.child(gtaskId).remove();
+        else await ref.child(`${gtaskId}/tries`).set(tries);
+      }
+    }
+    return done;
+  }
+  // סריקה תקופתית: 7 דקות, תדירות ייחודית כדי לא להתנגש בטיימרים אחרים
+  try {
+    const iv = setInterval(async () => {
+      try {
+        const all = (await db.ref('todoGcalEvFail').once('value')).val() || {};
+        for (const uid of Object.keys(all).slice(0, 20)) await evFlush(uid).catch(() => {});
+      } catch (e) {}
+    }, 7 * 60e3);
+    if (iv.unref) iv.unref();
+  } catch (e) {}
 
   // שינוי "צלצול גם מהיומן" בהגדרות - מעדכן את התזכורת באירועים עתידיים שכבר ביומן
   require('./taskReminders').patchCalAlerts = async (uid, on) => {
