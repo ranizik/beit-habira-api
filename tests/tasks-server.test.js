@@ -283,6 +283,43 @@ test('יומן: משימה → Google Tasks + אירוע ביומן (עדכון 
   } finally { global.fetch = realFetch; }
 });
 
+// כשל רגעי ביצירת האירוע ביומן לא מאבד את המשימה: היא נכנסת לתור וניסיון חוזר מסדר אותה.
+// בלי זה המשימה נשארת ב-Google Tasks בלי אירוע ביומן לתמיד - "פעם נכנס ופעם לא".
+test('יומן: אירוע שנכשל נכנס לתור ומסונכרן בניסיון הבא', async () => {
+  process.env.GCAL_CLIENT_SECRET = 'x';
+  const db = fakeDb({ todoGcal: { u1: { refresh: 'R', email: 'e', cal: true, events: true } } });
+  const admin = fakeAdmin({}); admin.tokens.u = { uid: 'u1' };
+  let calFails = true, posts = 0;
+  const realFetch = global.fetch;
+  global.fetch = async (url, o = {}) => {
+    if (String(url).includes('oauth2.googleapis.com/token')) return { status: 200, json: async () => ({ access_token: 'A', expires_in: 3600 }) };
+    if (String(url).includes('tasks.googleapis')) return { ok: true, status: 200, json: async () => ({ id: 'gt9' }) };
+    if (calFails) return { ok: false, status: 500, json: async () => ({ error: { message: 'boom' } }) };
+    posts++;
+    return { ok: true, status: 200, json: async () => ({ id: 'evOK' }) };
+  };
+  try {
+    const { call } = load(['taskReminders', 'tasksGcal'], db, admin);
+    const task = { name: 'פגישה', date: '2026-12-01', time: '09:00' };
+
+    // גוגל נופל: המשימה נשמרת, האירוע נכנס לתור
+    const r = await call('POST', '/tasks/gcal/task', { token: 'u', body: { op: 'create', task } });
+    assert.equal(r.body.ok, true, 'המשימה עצמה נשמרה');
+    assert.equal(r.body.id, 'gt9');
+    assert.equal(r.body.eventPending, true, 'דווח שהאירוע לא נכנס');
+    assert.ok(db.store.todoGcalEvFail.u1.gt9, 'האירוע נשמר לניסיון חוזר');
+    assert.equal(((db.store.todoGcalEv || {}).u1 || {}).gt9, undefined, 'עדיין אין אירוע ביומן');
+
+    // גוגל חזר: הקריאה הבאה מנקה את מה שנתקע
+    calFails = false;
+    await call('POST', '/tasks/gcal/task', { token: 'u', body: { op: 'update', gtaskId: 'gt9', task } });
+    await new Promise((ok) => setTimeout(ok, 20));
+    assert.equal(db.store.todoGcalEv.u1.gt9, 'evOK', 'האירוע נוצר בניסיון החוזר');
+    assert.ok(!(db.store.todoGcalEvFail.u1 || {}).gt9, 'התור התנקה');
+    assert.ok(posts >= 1);
+  } finally { global.fetch = realFetch; }
+});
+
 // ---------- מסלולים: מחיר ומכסת משתתפים ----------
 test('מסלולים: מחיר לפי פרטי/עסקי, משתתפים נוספים, מחיר קבוע, ורשימה מלאה', async () => {
   const db = fakeDb({ todoAccess: { config: { freeMode: true, price: 20, priceBusiness: 50, membersPrivate: 2, membersBusiness: 3, extraPricePrivate: 4, extraPriceBusiness: 6 },
